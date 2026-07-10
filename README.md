@@ -1,8 +1,19 @@
 # dabs-cicd-demo
 
-A minimal Databricks Asset Bundle (DAB) reference for CI/CD. It demonstrates a
-serverless **Spark Declarative Pipeline** (bronze → silver → gold, PySpark) and the
-DABs patterns that aren't obvious out of the box:
+A minimal Databricks Asset Bundle (DAB) reference for CI/CD. It demonstrates a serverless
+**Spark Declarative Pipeline** (bronze → silver → gold, PySpark) and the multi-environment
+DABs patterns that aren't obvious out of the box.
+
+**Contents**
+
+- [What this template includes](#what-this-template-includes) — the patterns it demonstrates and how the pieces fit.
+- [Standing it up end-to-end](#standing-it-up-end-to-end) — what *you* configure to make it actually run in your own account.
+
+---
+
+## What this template includes
+
+The patterns this repo demonstrates:
 
 1. Declaring **variables** in `databricks.yml` and **deriving** them per environment.
 2. Passing those variables into a **pipeline resource** — as resource fields (`catalog`)
@@ -10,8 +21,9 @@ DABs patterns that aren't obvious out of the box:
 3. **Referencing** the configuration variables in pipeline code with `spark.conf.get(...)`.
 4. Sharing a **`libraries/` helper package** across pipeline files on serverless.
 5. Environment-appropriate **`run_as` identity** and **deploy location** (`root_path`).
+6. Deploying prod from **GitHub Actions** authenticated via **OIDC** (no stored secret).
 
-## The variable flow (the core idea)
+### The variable flow (the core idea)
 
 ```
 databricks.yml  (variables, mostly DERIVED from the target name)
@@ -28,13 +40,13 @@ src/*.py   spark.conf.get("env") / spark.conf.get("quality_threshold")
                         labels / filter logic / output data
 ```
 
-### Pipelines vs jobs
+#### Pipelines vs jobs
 
 In a **job**, parameters arrive as `base_parameters` and are read with `dbutils.widgets`.
 In a **pipeline**, they arrive in the pipeline's `configuration` block and are read with
 `spark.conf.get(...)`. This repo uses the pipeline pattern.
 
-## Variables derived from the target
+### Variables derived from the target
 
 The targets are named `dev` / `staging` / `prod`, and so are the catalogs, so the bundle
 derives both `catalog` and `env` from `${bundle.target}` instead of repeating them per
@@ -55,7 +67,7 @@ is a genuine per-environment policy knob (not derivable from the name).
 > Testing elsewhere: override the catalog without touching the file, e.g.
 > `databricks bundle deploy -t dev --var="catalog=my_sandbox_catalog"`.
 
-## What it builds
+### What it builds
 
 Tables are written **schema-qualified, one schema per medallion layer** (schema names are
 consistent across all environments):
@@ -78,7 +90,7 @@ environment with no code change:
 | staging | 5000 | 8 |
 | prod | 15000 | 7 |
 
-## Shared library on serverless
+### Shared library on serverless
 
 `libraries/` is a normal Python package imported by the pipeline files
 (`from libraries.config import get_conf`). It resolves on serverless because the pipeline
@@ -87,10 +99,9 @@ sets `root_path: ..` (the bundle root), which Lakeflow automatically adds to `sy
 library onto the cluster, and the `--editable` install pattern is deliberately avoided
 because it no-ops on serverless.
 
-## Environments, identity, and deploy location
+### Environments, identity, and deploy location
 
-Three separate workspaces. Fill in each target's `host` in `databricks.yml`, and set
-`prod_service_principal` to your real prod SP application ID.
+Three separate workspaces (a single workspace also works — just point every target at it).
 
 | Target | Mode | catalog | run_as | Deploys to (`root_path`) |
 |--------|------|---------|--------|--------------------------|
@@ -108,7 +119,7 @@ Why this matters:
   and runs as a **service principal** (not any individual), which is the secure production
   pattern. In CI/CD the same SP should perform the deploy.
 
-## CI/CD: deploying prod from GitHub Actions
+### CI/CD: deploying prod from GitHub Actions
 
 Prod is deployed by **GitHub Actions**, not from a laptop. The workflow in
 [`.github/workflows/deploy-prod.yml`](.github/workflows/deploy-prod.yml) runs `databricks
@@ -143,33 +154,7 @@ worked example, and the honest "what was tested vs. referenced" notes are in
 - [Databricks — GitHub Actions for Databricks (AWS)](https://docs.databricks.com/aws/en/dev-tools/ci-cd/github)
 - [GitHub — about security hardening with OpenID Connect](https://docs.github.com/en/actions/security-for-github-actions/security-hardening-your-deployments/about-security-hardening-with-openid-connect)
 
-## Usage
-
-```bash
-# Validate (run per target)
-databricks bundle validate -t dev
-
-# Deploy
-databricks bundle deploy -t dev
-
-# Run the pipeline
-databricks bundle run dabs_cicd_pipeline -t dev
-
-# Tear down
-databricks bundle destroy -t dev
-```
-
-Swap `-t dev` for `-t staging` or `-t prod` for the other environments.
-
-## Local development
-
-```bash
-# Run the shared-library unit tests
-pip install -e ".[dev]"
-pytest
-```
-
-## Project structure
+### Project structure
 
 ```
 .
@@ -192,3 +177,75 @@ pytest
 │       └── deploy-prod.yml   # GitHub Actions: OIDC deploy to the prod target
 └── pyproject.toml            # local test config only
 ```
+
+---
+
+## Standing it up end-to-end
+
+The repo gives you the *pattern* and a *runnable workflow*, but the workspace hosts, the
+service principal, and the OIDC trust are yours to fill in — you can't commit someone else's
+identity or trust policy. Here is the path from a fresh clone to a working multi-environment
+deploy, **easiest first**. You can stop after step 4 if you only want dev/staging; steps 5–6
+add the hardened, automated prod path.
+
+### 1. Prerequisites
+
+- The [Databricks CLI](https://docs.databricks.com/aws/en/dev-tools/cli/install) installed and authenticated.
+- Access to at least one Databricks workspace (up to three if you want dev / staging / prod
+  fully separated).
+- The ability to create catalogs/schemas in each target's catalog — or an existing catalog
+  to point at instead (see step 3).
+- **For the prod path only:** account-admin rights to create a service principal and its
+  federation policy.
+
+### 2. Get the code and run the tests
+
+```bash
+git clone <your-fork-url> && cd dabs-cicd-demo
+pip install -e ".[dev]"
+pytest                      # confirms the shared library works before touching any workspace
+```
+
+### 3. Point the bundle at your workspaces
+
+In `databricks.yml`:
+
+- Set each target's `workspace.host` (replace the `<…-workspace>` placeholders).
+- Decide catalogs. By default they derive to `dabs_cicd_<env>`; if those don't exist, either
+  create them, override per target (the `sandbox` target shows the override pattern), or pass
+  `--var catalog=<existing_catalog>` at deploy time.
+
+### 4. Deploy dev / staging yourself — the fastest path to "it works"
+
+```bash
+databricks bundle validate -t dev
+databricks bundle deploy   -t dev
+databricks bundle run dabs_cicd_pipeline -t dev
+```
+
+These run in **development mode as you**, in your own workspace home — no service principal
+or CI required. Swap `-t dev` for `-t staging` for the other environment. This proves the
+pipeline end-to-end before you wire up any prod/OIDC machinery.
+
+### 5. Set up hardened prod (service principal + OIDC) — the CI path
+
+1. **Create the prod service principal** and put its application ID in
+   `prod_service_principal` in `databricks.yml`.
+2. **Grant the SP** `USE CATALOG, CREATE SCHEMA` on the prod catalog (plus `CAN_MANAGE` on
+   the deployed bundle — the `permissions` block already declares this).
+3. **Create the SP's federation policy** trusting GitHub's OIDC issuer, scoped to **your**
+   `repo:<org>/<repo>:environment:prod`.
+4. **In GitHub:** create an Environment named `prod` (add required reviewers for change
+   control), and add repository variables `DATABRICKS_HOST` and `DATABRICKS_CLIENT_ID` (both
+   are identifiers, not secrets).
+5. **Push to `main`** (or run the workflow manually) → GitHub Actions deploys and runs prod
+   **as the SP**, with no stored secret.
+
+Exact CLI commands and a worked example are in
+[`docs/prod-oidc-deploy.md`](docs/prod-oidc-deploy.md).
+
+### 6. Operate
+
+- The scheduled job (`resources/jobs.yml`) ships **paused** in every environment. Remove the
+  explicit `pause_status: PAUSED` line to restore the dev-paused / prod-unpaused behavior.
+- Tear down any target with `databricks bundle destroy -t <target>`.
