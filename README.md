@@ -108,6 +108,41 @@ Why this matters:
   and runs as a **service principal** (not any individual), which is the secure production
   pattern. In CI/CD the same SP should perform the deploy.
 
+## CI/CD: deploying prod from GitHub Actions
+
+Prod is deployed by **GitHub Actions**, not from a laptop. The workflow in
+[`.github/workflows/deploy-prod.yml`](.github/workflows/deploy-prod.yml) runs `databricks
+bundle deploy -t prod` (then runs the pipeline) on every push to `main` and on manual
+dispatch — gated behind a GitHub **Environment** named `prod`, where you attach
+required-reviewer rules so a merge only deploys after approval.
+
+The deploy authenticates as the **prod service principal** using **OpenID Connect (OIDC)** —
+Databricks calls this **Workload Identity Federation**. There is **no Databricks secret
+stored in GitHub**:
+
+1. GitHub mints a short-lived **OIDC token** for the workflow run.
+2. A **federation policy** on the service principal trusts that token, scoped to this exact
+   repo + environment (`repo:<org>/<repo>:environment:prod`).
+3. The Databricks CLI exchanges the OIDC token for a short-lived Databricks token and
+   deploys **as the SP** (`DATABRICKS_AUTH_TYPE: github-oidc`).
+
+Why OIDC matters *for this project*: because the **SP authenticates the deploy, the SP owns
+the deployed workspace files** — no human does. That is what makes the prod hardening in
+`databricks.yml` (identity-neutral `root_path`, `run_as` the SP, `CAN_VIEW`-only for everyone
+else) actually hold. And since the token is minted per-run and never stored, there is no
+long-lived secret to leak or rotate.
+
+The one-time setup (create the SP, its federation policy, and the GitHub Environment), a
+worked example, and the honest "what was tested vs. referenced" notes are in
+[`docs/prod-oidc-deploy.md`](docs/prod-oidc-deploy.md).
+
+**References**
+
+- [Databricks — workload identity federation for GitHub Actions (AWS)](https://docs.databricks.com/aws/en/dev-tools/auth/provider-github)
+- [Databricks — configure a federation policy (AWS)](https://docs.databricks.com/aws/en/dev-tools/auth/oauth-federation-policy)
+- [Databricks — GitHub Actions for Databricks (AWS)](https://docs.databricks.com/aws/en/dev-tools/ci-cd/github)
+- [GitHub — about security hardening with OpenID Connect](https://docs.github.com/en/actions/security-for-github-actions/security-hardening-your-deployments/about-security-hardening-with-openid-connect)
+
 ## Usage
 
 ```bash
@@ -140,7 +175,8 @@ pytest
 .
 ├── databricks.yml            # bundle name, derived variables, three targets
 ├── resources/
-│   └── pipelines.yml         # pipeline resource; wires variables in
+│   ├── pipelines.yml         # pipeline resource; wires variables in
+│   └── jobs.yml              # scheduled job that triggers the pipeline
 ├── libraries/                # shared, importable helpers (not pipeline defs)
 │   ├── config.py             # get_conf, parse_threshold
 │   └── naming.py             # table_fqn, label_for_env
@@ -149,5 +185,10 @@ pytest
 │   ├── silver.py             # enrich + quality filter    → silver.trades
 │   └── gold.py               # aggregate                  → gold.portfolio_summary
 ├── tests/                    # pytest for libraries/ (local only)
+├── docs/
+│   └── prod-oidc-deploy.md   # SP + OIDC hardening: one-time setup & worked example
+├── .github/
+│   └── workflows/
+│       └── deploy-prod.yml   # GitHub Actions: OIDC deploy to the prod target
 └── pyproject.toml            # local test config only
 ```
