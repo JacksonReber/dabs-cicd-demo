@@ -1,0 +1,88 @@
+bundle:
+  name: dabs_cicd_demo
+
+include:
+  - resources/*.yml
+
+# Variables are declared once. `catalog` and `env` are DERIVED from the target
+# name (${bundle.target} = dev | staging | prod), so standing up or maintaining
+# an environment is just adding a target — there is no per-env catalog/env wiring
+# to keep in sync. `quality_threshold` stays per-target because it is a genuine
+# per-env policy knob, not something derivable from the name.
+variables:
+  catalog:
+    description: >-
+      Target Unity Catalog. Defaults to dabs_cicd_<env>, derived from the target
+      name. Override with `--var catalog=...` to deploy somewhere else for ad-hoc
+      testing (e.g. a sandbox workspace that doesn't have the dabs_cicd_* catalogs).
+    default: dabs_cicd_${bundle.target}
+  env:
+    description: Environment label, read in pipeline code. Defaults to the target name.
+    default: ${bundle.target}
+  quality_threshold:
+    description: Minimum trade_value a row must meet to pass the silver layer.
+  prod_service_principal:
+    description: Application ID of the service principal that runs the prod pipeline.
+    default: "<prod-service-principal-application-id>"
+
+targets:
+  # dev & staging run in DEVELOPMENT mode: each developer deploys to their OWN
+  # workspace home (/Workspace/Users/<them>/.bundle/${bundle.name}/${bundle.target})
+  # and the pipeline runs as that developer — so developers never overwrite each
+  # other's deployments. No `root_path` or `run_as` is needed here; that isolation
+  # is the development-mode default. Resources are also prefixed with [dev <user>].
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://<dev-workspace>.cloud.databricks.com
+    variables:
+      quality_threshold: "0"
+
+  staging:
+    mode: development
+    workspace:
+      host: https://<staging-workspace>.cloud.databricks.com
+    variables:
+      quality_threshold: "5000"
+
+  # Personal sandbox workspace. Same DEVELOPMENT-mode isolation as dev/staging, but this
+  # workspace has no dabs_cicd_* catalog, so the catalog var is overridden to an
+  # existing catalog (the ad-hoc pattern the `catalog` variable doc calls out).
+  sandbox:
+    mode: development
+    workspace:
+      host: https://<sandbox-workspace>.cloud.databricks.com
+    variables:
+      catalog: sandbox_catalog
+      quality_threshold: "0"
+
+  # prod runs in PRODUCTION mode and is HARDENED so the deployed bundle artifacts
+  # cannot be modified or deleted by ordinary users:
+  #   - The SERVICE PRINCIPAL is both the DEPLOY identity and the RUN identity. In
+  #     CI/CD the SP authenticates (GitHub OIDC federation, or an OAuth M2M secret)
+  #     and runs `bundle deploy`, so the SP — never a human — OWNS the workspace
+  #     files. (`run_as` alone only sets the run identity; file ownership comes from
+  #     whoever authenticates the deploy.)
+  #   - Files deploy to the SP's OWN home, which is identity-neutral (a service
+  #     identity, not a person) AND not world-writable — unlike /Workspace/Shared,
+  #     which grants read/write to all workspace users.
+  #   - `permissions` lock the deployment folder and resources: only the SP can
+  #     manage; everyone else is read-only (CAN_VIEW).
+  #   NOTE: workspace/account admins still bypass object ACLs by design. Real
+  #   protection = few admins + guarded SP credentials (CI/CD secret store or OIDC,
+  #   never on a laptop) + Git as the source of truth + audit logs — not ACLs alone.
+  prod:
+    mode: production
+    workspace:
+      host: https://<prod-workspace>.cloud.databricks.com
+      root_path: /Workspace/Users/${var.prod_service_principal}/.bundle/${bundle.name}/${bundle.target}
+    run_as:
+      service_principal_name: ${var.prod_service_principal}
+    permissions:
+      - level: CAN_MANAGE
+        service_principal_name: ${var.prod_service_principal}
+      - level: CAN_VIEW
+        group_name: users
+    variables:
+      quality_threshold: "15000"

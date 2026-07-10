@@ -1,0 +1,50 @@
+# Deploy the bundle to the `prod` target from GitHub Actions, authenticating as a
+# Databricks service principal via Workload Identity Federation (OIDC) — NO stored
+# Databricks secret. GitHub mints a short-lived OIDC token; the federation policy on
+# the service principal trusts it (see docs/prod-oidc-deploy.md for the one-time setup).
+#
+# This is the secret-less variant of the OAuth M2M flow used to prove the hardening
+# locally: in both cases the SERVICE PRINCIPAL is the deploy identity, so the SP — not
+# a human — owns the deployed workspace files.
+#
+# NOTE: this workflow is a reference deliverable. It has not been executed against the
+# internal sandbox environment, because it enforces a corp-egress-only IP ACL that
+# 403s GitHub-hosted runners at the network layer. It is intended to run against a
+# customer prod workspace (no such ACL) using a self-hosted runner only if the target
+# workspace is similarly network-restricted.
+
+name: deploy-prod
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write   # REQUIRED: lets the job request a GitHub OIDC token
+  contents: read    # checkout
+
+jobs:
+  deploy-prod:
+    runs-on: ubuntu-latest
+    # The GitHub Environment named `prod` is where you attach required-reviewer
+    # protection rules. The federation policy's subject is scoped to this environment
+    # (repo:<org>/<repo>:environment:prod), so only runs in this environment can
+    # authenticate as the prod service principal.
+    environment: prod
+    env:
+      DATABRICKS_AUTH_TYPE: github-oidc            # tells the CLI to use the GitHub OIDC token
+      DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }} # e.g. https://<workspace>.cloud.databricks.com
+      DATABRICKS_CLIENT_ID: ${{ vars.DATABRICKS_CLIENT_ID }} # the SP's application ID (an identifier, not a secret)
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: databricks/setup-cli@main
+
+      # No `databricks auth login` and no client secret: with DATABRICKS_AUTH_TYPE=github-oidc
+      # the CLI exchanges the runner's OIDC token for a short-lived Databricks token.
+      - name: Deploy bundle (prod)
+        run: databricks bundle deploy -t prod
+
+      - name: Run pipeline (prod)
+        run: databricks bundle run dabs_cicd_pipeline -t prod

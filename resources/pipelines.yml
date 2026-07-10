@@ -1,0 +1,31 @@
+resources:
+  pipelines:
+    dabs_cicd_pipeline:
+      name: dabs_cicd_pipeline_${var.env}
+
+      # Variable -> pipeline RESOURCE field. Sets the default catalog
+      # (dabs_cicd_<env>, derived from the target name).
+      catalog: ${var.catalog}
+
+      # Default schema for any unqualified name. Tables are written
+      # schema-qualified per medallion layer (bronze.* / silver.* / gold.*),
+      # with schema names kept consistent across all environments.
+      schema: bronze
+
+      serverless: true
+
+      # root_path is the bundle root. Lakeflow auto-appends it to sys.path,
+      # which is what makes `from libraries.config import ...` resolve in the
+      # transformation files. (Do NOT use environment.dependencies/--editable;
+      # it no-ops on serverless.)
+      root_path: ..
+
+      # Only src/ holds pipeline definitions; libraries/ is imported, not run.
+      libraries:
+        - glob:
+            include: ../src/**
+
+      # Variables -> pipeline CONFIGURATION. Read in code via spark.conf.get().
+      configuration:
+        env: ${var.env}
+        quality_threshold: ${var.quality_threshold}

@@ -1,0 +1,25 @@
+resources:
+  jobs:
+    # A scheduled job that triggers the pipeline.
+    #
+    # Background — DABs deployment-mode behavior this was built to show:
+    #   - `mode: development` (dev / staging) PAUSES schedules/triggers on deploy.
+    #   - `mode: production` (prod) leaves them UNPAUSED, so they run on cadence.
+    #
+    # We have since set `pause_status: PAUSED` EXPLICITLY below so the prod schedule does
+    # not actually fire in this demo workspace. A resource-level `pause_status` OVERRIDES
+    # the deployment-mode default, so the schedule is now PAUSED in every environment
+    # (dev, staging, AND prod) and stays paused across redeploys. To restore the live
+    # dev=PAUSED / prod=UNPAUSED demonstration, remove the `pause_status` line and redeploy.
+    dabs_cicd_pipeline_schedule:
+      name: dabs_cicd_pipeline_schedule_${var.env}
+
+      schedule:
+        quartz_cron_expression: "0 0 6 * * ?"   # daily at 06:00
+        timezone_id: America/Los_Angeles
+        pause_status: PAUSED                     # explicit override → paused in ALL envs, persists through deploys
+
+      tasks:
+        - task_key: run_pipeline
+          pipeline_task:
+            pipeline_id: ${resources.pipelines.dabs_cicd_pipeline.id}
