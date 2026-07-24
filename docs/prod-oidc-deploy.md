@@ -29,6 +29,13 @@ person. There are two ways for the SP to authenticate a deploy:
 Both authenticate the deploy *as the SP*, so both produce the same outcome: the SP owns
 the deployed files. OIDC just removes the stored secret.
 
+> **Staging uses the same mechanism.** `staging` is also a CI-owned target with its own
+> service principal and OIDC federation policy — scoped to `repo:<org>/<repo>:environment:staging`
+> and using the `DATABRICKS_STAGING_HOST` / `DATABRICKS_STAGING_CLIENT_ID` repo variables.
+> The only difference from prod is that staging skips the hardened `permissions` lock (it is
+> a test bed) and is not in production mode. Everything below applies to staging too — just
+> swap the environment name and SP.
+
 ## What the `prod` target enforces (see `databricks.yml`)
 
 - `run_as.service_principal_name` → pipeline runs as the SP.

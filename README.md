@@ -21,7 +21,8 @@ The patterns this repo demonstrates:
 3. **Referencing** the configuration variables in pipeline code with `spark.conf.get(...)`.
 4. Sharing a **`libraries/` helper package** across pipeline files on serverless.
 5. Environment-appropriate **`run_as` identity** and **deploy location** (`root_path`).
-6. Deploying prod from **GitHub Actions** authenticated via **OIDC** (no stored secret).
+6. A full **CI/CD pipeline** in GitHub Actions — PR validation (`ci.yml`) and a gated
+   **staging → prod promotion** (`deploy.yml`) — authenticated via **OIDC** (no stored secret).
 
 ### The variable flow (the core idea)
 
@@ -106,34 +107,63 @@ Three separate workspaces (a single workspace also works — just point every ta
 | Target | Mode | catalog | run_as | Deploys to (`root_path`) |
 |--------|------|---------|--------|--------------------------|
 | dev (default) | development | dabs_cicd_dev | the deploying developer | that developer's home (`/Workspace/Users/<dev>/.bundle/...`) |
-| staging | development | dabs_cicd_staging | the deploying developer | that developer's home |
-| prod | production | dabs_cicd_prod | a **service principal** | shared (`/Workspace/Shared/.bundle/...`) |
+| staging | (default) | dabs_cicd_staging | a **staging service principal** | the SP's home (`/Workspace/Users/<staging-sp>/.bundle/...`) |
+| prod | production | dabs_cicd_prod | a **prod service principal** | the SP's home (`/Workspace/Users/<prod-sp>/.bundle/...`) |
 
 Why this matters:
 
-- **dev / staging** use **development mode**, whose defaults give you exactly what you want
-  for shared dev work: each developer deploys to their **own** workspace home and the
-  pipeline **runs as that developer**, so developers never overwrite each other. No
-  `root_path` or `run_as` is configured for these targets — it's the mode default.
-- **prod** uses **production mode**: it deploys to a **shared, identity-neutral location**
-  and runs as a **service principal** (not any individual), which is the secure production
-  pattern. In CI/CD the same SP should perform the deploy.
+- **dev** uses **development mode**, whose defaults give you exactly what you want for
+  shared dev work: each developer deploys to their **own** workspace home and the pipeline
+  **runs as that developer**, so developers never overwrite each other. No `root_path` or
+  `run_as` is configured — it's the mode default.
+- **staging** is a **stable, CI-owned** environment, not a personal dev target. It has its
+  **own service principal** that both deploys and runs it (via OIDC from CI), so
+  integration tests execute against a reproducible, un-prefixed deployment rather than
+  whatever a developer last pushed. That is why it is *not* development mode — it mirrors
+  prod's identity model (minus the hardened `permissions` lock, so it stays easy to debug).
+  This split matches databricks/mlops-stacks, where only `dev` is development mode.
+- **prod** uses **production mode**: it runs as a **service principal** (not any
+  individual), deploys to that SP's identity-neutral home, pins `git.branch: main` so it
+  can only deploy from the release branch, and locks the deployment with `permissions`. In
+  CI/CD the same SP performs the deploy, so the SP — not a human — owns the files.
 
-### CI/CD: deploying prod from GitHub Actions
+### CI/CD: the full pipeline in GitHub Actions
 
-Prod is deployed by **GitHub Actions**, not from a laptop. The workflow in
-[`.github/workflows/deploy-prod.yml`](.github/workflows/deploy-prod.yml) runs `databricks
-bundle deploy -t prod` (then runs the pipeline) on every push to `main` and on manual
-dispatch — gated behind a GitHub **Environment** named `prod`, where you attach
-required-reviewer rules so a merge only deploys after approval.
+The repo ships the complete `validate → deploy → run` lifecycle as two workflows, so nothing
+reaches a workspace from a laptop:
 
-The deploy authenticates as the **prod service principal** using **OpenID Connect (OIDC)** —
+**1. [`ci.yml`](.github/workflows/ci.yml) — on every pull request.** Runs the unit tests
+(`pytest` over `libraries/`), then `databricks bundle validate` against **staging** and
+**prod** in parallel. A broken bundle or a failing test fails the PR — it can't merge.
+
+**2. [`deploy.yml`](.github/workflows/deploy.yml) — on merge to `main`.** A gated promotion:
+
+```
+merge to main
+   │
+   ▼
+deploy-staging      validate → deploy → run   (the run IS the integration test)
+   │  needs: (must succeed)
+   ▼
+deploy-prod         validate → deploy → run   (behind the `prod` Environment approval gate)
+```
+
+Staging deploys and runs first; prod starts **only if staging fully succeeds** (`needs:`),
+and then only after the required reviewers on the `prod` GitHub **Environment** approve. This
+is the recommended promotion order — stage before prod, humans gate prod — enforced in the
+workflow rather than left to convention. (databricks/mlops-stacks achieves the same split by
+routing `main` → staging and a `release` branch → prod; this repo keeps one protected branch
+and chains the jobs.)
+
+Every job authenticates as its environment's **service principal** using **OpenID Connect
+(OIDC)** —
 Databricks calls this **Workload Identity Federation**. There is **no Databricks secret
 stored in GitHub**:
 
 1. GitHub mints a short-lived **OIDC token** for the workflow run.
-2. A **federation policy** on the service principal trusts that token, scoped to this exact
-   repo + environment (`repo:<org>/<repo>:environment:prod`).
+2. A **federation policy** on each service principal trusts that token, scoped to this exact
+   repo + environment (`repo:<org>/<repo>:environment:prod` for the prod SP,
+   `:environment:staging` for the staging SP).
 3. The Databricks CLI exchanges the OIDC token for a short-lived Databricks token and
    deploys **as the SP** (`DATABRICKS_AUTH_TYPE: github-oidc`).
 
@@ -174,7 +204,8 @@ worked example, and the honest "what was tested vs. referenced" notes are in
 │   └── prod-oidc-deploy.md   # SP + OIDC hardening: one-time setup & worked example
 ├── .github/
 │   └── workflows/
-│       └── deploy-prod.yml   # GitHub Actions: OIDC deploy to the prod target
+│       ├── ci.yml            # PR: pytest + bundle validate (staging & prod)
+│       └── deploy.yml        # merge→main: gated staging → prod promotion (OIDC)
 └── pyproject.toml            # local test config only
 ```
 
@@ -182,11 +213,11 @@ worked example, and the honest "what was tested vs. referenced" notes are in
 
 ## Standing it up end-to-end
 
-The repo gives you the *pattern* and a *runnable workflow*, but the workspace hosts, the
-service principal, and the OIDC trust are yours to fill in — you can't commit someone else's
+The repo gives you the *pattern* and *runnable workflows*, but the workspace hosts, the
+service principals, and the OIDC trust are yours to fill in — you can't commit someone else's
 identity or trust policy. Here is the path from a fresh clone to a working multi-environment
-deploy, **easiest first**. You can stop after step 4 if you only want dev/staging; steps 5–6
-add the hardened, automated prod path.
+deploy, **easiest first**. You can stop after step 4 if you only want local dev; steps 5–6
+add the CI-owned staging and hardened prod path.
 
 ### 1. Prerequisites
 
@@ -215,7 +246,7 @@ In `databricks.yml`:
   create them, override per target (the `sandbox` target shows the override pattern), or pass
   `--var catalog=<existing_catalog>` at deploy time.
 
-### 4. Deploy dev / staging yourself — the fastest path to "it works"
+### 4. Deploy dev yourself — the fastest path to "it works"
 
 ```bash
 databricks bundle validate -t dev
@@ -223,23 +254,30 @@ databricks bundle deploy   -t dev
 databricks bundle run dabs_cicd_pipeline -t dev
 ```
 
-These run in **development mode as you**, in your own workspace home — no service principal
-or CI required. Swap `-t dev` for `-t staging` for the other environment. This proves the
-pipeline end-to-end before you wire up any prod/OIDC machinery.
+This runs in **development mode as you**, in your own workspace home — no service principal
+or CI required. It proves the pipeline end-to-end before you wire up any SP/OIDC machinery.
+(staging and prod are CI-owned and deploy as service principals — see step 5, not by hand.)
 
-### 5. Set up hardened prod (service principal + OIDC) — the CI path
+### 5. Set up the CI environments (service principals + OIDC)
 
-1. **Create the prod service principal** and put its application ID in
-   `prod_service_principal` in `databricks.yml`.
-2. **Grant the SP** `USE CATALOG, CREATE SCHEMA` on the prod catalog (plus `CAN_MANAGE` on
-   the deployed bundle — the `permissions` block already declares this).
+Staging and prod each get their **own** service principal and federation policy — the setup
+is identical, only the environment name and SP differ. For **each** of `staging` and `prod`:
+
+1. **Create the service principal** and put its application ID in the matching variable in
+   `databricks.yml` (`staging_service_principal` / `prod_service_principal`).
+2. **Grant the SP** `USE CATALOG, CREATE SCHEMA` on that environment's catalog. (Prod also
+   declares a `CAN_MANAGE` `permissions` lock in `databricks.yml`; staging is left open for
+   easy debugging.)
 3. **Create the SP's federation policy** trusting GitHub's OIDC issuer, scoped to **your**
-   `repo:<org>/<repo>:environment:prod`.
-4. **In GitHub:** create an Environment named `prod` (add required reviewers for change
-   control), and add repository variables `DATABRICKS_HOST` and `DATABRICKS_CLIENT_ID` (both
-   are identifiers, not secrets).
-5. **Push to `main`** (or run the workflow manually) → GitHub Actions deploys and runs prod
-   **as the SP**, with no stored secret.
+   `repo:<org>/<repo>:environment:staging` (or `:environment:prod`).
+4. **In GitHub:** create an Environment of that name (add required reviewers to `prod` for
+   change control), and add its repository variables — both are identifiers, not secrets:
+   - `prod`: `DATABRICKS_HOST`, `DATABRICKS_CLIENT_ID`
+   - `staging`: `DATABRICKS_STAGING_HOST`, `DATABRICKS_STAGING_CLIENT_ID`
+
+Then the pipeline runs itself: **open a PR** → `ci.yml` tests + validates; **merge to `main`**
+→ `deploy.yml` deploys/tests staging, then (after approval) deploys/runs prod — all as the
+SPs, with no stored secret.
 
 Exact CLI commands and a worked example are in
 [`docs/prod-oidc-deploy.md`](docs/prod-oidc-deploy.md).
