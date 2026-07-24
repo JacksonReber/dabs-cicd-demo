@@ -213,24 +213,18 @@ worked example, and the honest "what was tested vs. referenced" notes are in
 
 ## Standing it up end-to-end
 
-The repo is a complete, runnable **shell**: the workflows, both GitHub Environments, and all
-four CI variables are already in place (the variables hold obvious placeholders). The only
-things you supply are the identities and hosts that can't be committed — the workspace URLs,
-the service principals, and the OIDC trust policy. Here is the path from a fresh clone to a
-working multi-environment deploy, **easiest first**. You can stop after step 4 if you only
-want local dev; steps 5–6 add the CI-owned staging and hardened prod path.
+Complete, runnable shell. Workflows, both GitHub Environments (`staging`, `prod`), and all four CI variables already exist. Variables hold obvious placeholders. You supply only what can't be committed: workspace URLs, service principals, OIDC trust policy.
+
+Ordered easiest-first. Stop after step 4 for local dev. Steps 5 and 6 add CI-owned staging and hardened prod.
 
 ### 1. Prerequisites
 
-- The [Databricks CLI](https://docs.databricks.com/aws/en/dev-tools/cli/install) installed and authenticated.
-- Access to at least one Databricks workspace (up to three if you want dev / staging / prod
-  fully separated).
-- The ability to create catalogs/schemas in each target's catalog — or an existing catalog
-  to point at instead (see step 3).
-- **For the prod path only:** account-admin rights to create a service principal and its
-  federation policy.
+- [Databricks CLI](https://docs.databricks.com/aws/en/dev-tools/cli/install) installed and authenticated.
+- At least one workspace. Up to three for fully separated dev / staging / prod.
+- Rights to create catalogs/schemas in each target's catalog, or an existing catalog to point at (step 3).
+- Prod/staging CI path only: account-admin rights to create a service principal + federation policy.
 
-### 2. Get the code and run the tests
+### 2. Clone and test
 
 ```bash
 git clone <your-fork-url> && cd dabs-cicd-demo
@@ -240,14 +234,15 @@ pytest                      # confirms the shared library works before touching 
 
 ### 3. Point the bundle at your workspaces
 
-In `databricks.yml`:
+Placeholders to replace in `databricks.yml`:
 
-- Set each target's `workspace.host` (replace the `<…-workspace>` placeholders).
-- Decide catalogs. By default they derive to `dabs_cicd_<env>`; if those don't exist, either
-  create them, override per target (the `sandbox` target shows the override pattern), or pass
-  `--var catalog=<existing_catalog>` at deploy time.
+- `workspace.host` on each target. Swap the `<…-workspace>` values for real workspace URLs.
+- Catalogs: default to `dabs_cicd_<env>`. If those don't exist, create them, override per target (see the `sandbox` target), or pass `--var catalog=<existing_catalog>` at deploy time.
+- `prod_service_principal` / `staging_service_principal`. Filled in step 5.
 
-### 4. Deploy dev yourself — the fastest path to "it works"
+### 4. Deploy dev yourself
+
+Fastest path to "it works". Runs in development mode as you, in your own workspace home. No service principal or CI.
 
 ```bash
 databricks bundle validate -t dev
@@ -255,42 +250,30 @@ databricks bundle deploy   -t dev
 databricks bundle run dabs_cicd_pipeline -t dev
 ```
 
-This runs in **development mode as you**, in your own workspace home — no service principal
-or CI required. It proves the pipeline end-to-end before you wire up any SP/OIDC machinery.
-(staging and prod are CI-owned and deploy as service principals — see step 5, not by hand.)
+Proves the pipeline end-to-end before any SP/OIDC machinery. Staging and prod are CI-owned and deploy as service principals (step 5), not by hand.
 
 ### 5. Wire up the CI environments (staging + prod)
 
-Staging and prod are CI-owned: each authenticates from GitHub Actions as its **own** service
-principal via OIDC. The GitHub-side **shell is already scaffolded in this repo** so you can
-see the complete wiring — the only thing missing is real identities, which can't be committed.
+Staging and prod each authenticate from GitHub Actions as their own service principal via OIDC. GitHub-side shell is already scaffolded. Only real identities are missing.
 
-**Already scaffolded (nothing to create):**
+**Already scaffolded, nothing to create:**
 
-- GitHub **Environments** `staging` and `prod` exist. Attach required-reviewer protection to
-  `prod` when you go live — that is the human approval gate before `deploy.yml` touches prod.
-- Repository **variables** exist, pre-filled with obvious placeholders (they are identifiers,
-  not secrets, which is why they're plain variables). The workflows read them via `vars.*`:
+- **Environments** `staging` and `prod`. Attach required-reviewer protection to `prod` before going live: this is the human approval gate before `deploy.yml` touches prod.
+- **Repository variables**, pre-filled with placeholders. Identifiers, not secrets, so plain variables. Workflows read them via `vars.*`:
 
-  | Variable | Placeholder value | Used by |
-  |----------|-------------------|---------|
+  | Variable | Placeholder | Used by |
+  |----------|-------------|---------|
   | `DATABRICKS_HOST` | `https://<prod-workspace>.cloud.databricks.com` | prod jobs |
   | `DATABRICKS_CLIENT_ID` | `<prod-service-principal-application-id>` | prod jobs |
   | `DATABRICKS_STAGING_HOST` | `https://<staging-workspace>.cloud.databricks.com` | staging jobs |
   | `DATABRICKS_STAGING_CLIENT_ID` | `<staging-service-principal-application-id>` | staging jobs |
 
-**What you supply to make it actually run** — for **each** of `staging` and `prod` (the steps
-are identical; only the environment name and SP differ):
+**What you supply, repeated for each of `staging` and `prod`** (identical steps; only the environment name and SP differ). Steps 1 through 3 need account-admin. Exact CLI commands + worked example: [`docs/prod-oidc-deploy.md`](docs/prod-oidc-deploy.md).
 
-1. **Create a service principal** and put its application ID in the matching variable in
-   `databricks.yml` (`staging_service_principal` / `prod_service_principal`).
-2. **Grant the SP** `USE CATALOG, CREATE SCHEMA` on that environment's catalog. (Prod also
-   declares a `CAN_MANAGE` `permissions` lock in `databricks.yml`; staging is left open for
-   easy debugging.)
-3. **Create the SP's federation policy** trusting GitHub's OIDC issuer, scoped to **your**
-   `repo:<org>/<repo>:environment:staging` (or `:environment:prod`).
-4. **Replace the placeholder GitHub variables** with real values — set the host to your
-   workspace URL and the client ID to the SP's application ID:
+1. **Create a service principal.** Put its application ID in the matching `databricks.yml` variable (`staging_service_principal` / `prod_service_principal`).
+2. **Grant the SP** `USE CATALOG, CREATE SCHEMA` on that environment's catalog. Prod also declares a `CAN_MANAGE` `permissions` lock; staging is left open for easy debugging.
+3. **Create the SP's federation policy.** Trusts GitHub's OIDC issuer, scoped to `repo:<org>/<repo>:environment:staging` (or `:environment:prod`).
+4. **Replace the placeholder GitHub variables** with real values:
 
    ```bash
    gh variable set DATABRICKS_STAGING_HOST      --body "https://<your-staging-workspace>.cloud.databricks.com"
@@ -299,19 +282,22 @@ are identical; only the environment name and SP differ):
    gh variable set DATABRICKS_CLIENT_ID         --body "<your-prod-sp-app-id>"
    ```
 
-   > These are set at the **repository** level (readable by every job). To harden further,
-   > move each pair to its matching **Environment** scope instead — `vars.*` resolves at
-   > either level, so no workflow change is needed.
-
-Then the pipeline runs itself: **open a PR** → `ci.yml` tests + validates; **merge to `main`**
-→ `deploy.yml` deploys/tests staging, then (after `prod` approval) deploys/runs prod — all as
-the SPs, with no stored secret.
-
-Steps 1–3 need account-admin rights. Exact CLI commands and a worked example are in
-[`docs/prod-oidc-deploy.md`](docs/prod-oidc-deploy.md).
+Then the pipeline runs itself. Open a PR → `ci.yml` tests + validates. Merge to `main` → `deploy.yml` deploys/tests staging, then (after `prod` approval) deploys/runs prod. All as the SPs, no stored secret.
 
 ### 6. Operate
 
-- The scheduled job (`resources/jobs.yml`) ships **paused** in every environment. Remove the
-  explicit `pause_status: PAUSED` line to restore the dev-paused / prod-unpaused behavior.
-- Tear down any target with `databricks bundle destroy -t <target>`.
+- Scheduled job (`resources/jobs.yml`) ships PAUSED in every environment. Remove the explicit `pause_status: PAUSED` line to restore dev-paused / prod-unpaused behavior.
+- Tear down any target: `databricks bundle destroy -t <target>`.
+
+### Caveats and decisions
+
+Things to weigh before running this for real:
+
+- **Merging to `main` costs compute.** `deploy.yml` deploys *and runs* the pipeline in staging, then prod, on every merge. Serverless spins up each time. The prod schedule ships paused, but the CI-triggered `bundle run` is not.
+- **Variable scope is repo-level.** All four CI variables are readable by every job. For tighter isolation, move each pair to its matching Environment scope. `vars.*` resolves at either level, so no workflow change needed. Worth doing for real prod identifiers so unrelated workflows and fork PRs can't read them.
+- **`git.branch: main` on prod gates deploy, not validate.** Prod refuses to deploy from any branch except `main`. `workflow_dispatch` from a feature branch, or a stale local checkout, will fail. Intended safeguard.
+- **Staging is CI-only now.** Moving staging to `run_as` a service principal + SP-home `root_path` means a laptop `bundle deploy -t staging` no longer works cleanly. Want manual staging deploys? That friction is the tradeoff.
+- **The staging "integration test" is shallow.** `bundle run` proves the pipeline builds and runs. It asserts nothing about correctness (row counts, schema, values). A pipeline that runs but emits wrong data still passes the gate. Add `execute_sql` assertions after the run for a real test.
+- **`databricks/setup-cli@main` tracks a moving target.** A breaking CLI change could break the pipeline silently. Pin a version (e.g. `@v0.236.0`) for a real production repo.
+- **OIDC path is unproven.** Local `bundle validate` was tested against a live workspace; the SP-over-OIDC auth was never run end-to-end (needs the SPs + federation policies created). First real Actions run is where federation subject mismatches or missing SP grants surface.
+- **FEVM workspaces block GitHub-hosted runners.** Corp-egress-only IP ACL 403s the runner at the network layer. Use a non-FEVM workspace, or a self-hosted runner inside the allowed network.
