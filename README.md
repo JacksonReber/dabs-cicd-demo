@@ -213,11 +213,12 @@ worked example, and the honest "what was tested vs. referenced" notes are in
 
 ## Standing it up end-to-end
 
-The repo gives you the *pattern* and *runnable workflows*, but the workspace hosts, the
-service principals, and the OIDC trust are yours to fill in — you can't commit someone else's
-identity or trust policy. Here is the path from a fresh clone to a working multi-environment
-deploy, **easiest first**. You can stop after step 4 if you only want local dev; steps 5–6
-add the CI-owned staging and hardened prod path.
+The repo is a complete, runnable **shell**: the workflows, both GitHub Environments, and all
+four CI variables are already in place (the variables hold obvious placeholders). The only
+things you supply are the identities and hosts that can't be committed — the workspace URLs,
+the service principals, and the OIDC trust policy. Here is the path from a fresh clone to a
+working multi-environment deploy, **easiest first**. You can stop after step 4 if you only
+want local dev; steps 5–6 add the CI-owned staging and hardened prod path.
 
 ### 1. Prerequisites
 
@@ -258,28 +259,55 @@ This runs in **development mode as you**, in your own workspace home — no serv
 or CI required. It proves the pipeline end-to-end before you wire up any SP/OIDC machinery.
 (staging and prod are CI-owned and deploy as service principals — see step 5, not by hand.)
 
-### 5. Set up the CI environments (service principals + OIDC)
+### 5. Wire up the CI environments (staging + prod)
 
-Staging and prod each get their **own** service principal and federation policy — the setup
-is identical, only the environment name and SP differ. For **each** of `staging` and `prod`:
+Staging and prod are CI-owned: each authenticates from GitHub Actions as its **own** service
+principal via OIDC. The GitHub-side **shell is already scaffolded in this repo** so you can
+see the complete wiring — the only thing missing is real identities, which can't be committed.
 
-1. **Create the service principal** and put its application ID in the matching variable in
+**Already scaffolded (nothing to create):**
+
+- GitHub **Environments** `staging` and `prod` exist. Attach required-reviewer protection to
+  `prod` when you go live — that is the human approval gate before `deploy.yml` touches prod.
+- Repository **variables** exist, pre-filled with obvious placeholders (they are identifiers,
+  not secrets, which is why they're plain variables). The workflows read them via `vars.*`:
+
+  | Variable | Placeholder value | Used by |
+  |----------|-------------------|---------|
+  | `DATABRICKS_HOST` | `https://<prod-workspace>.cloud.databricks.com` | prod jobs |
+  | `DATABRICKS_CLIENT_ID` | `<prod-service-principal-application-id>` | prod jobs |
+  | `DATABRICKS_STAGING_HOST` | `https://<staging-workspace>.cloud.databricks.com` | staging jobs |
+  | `DATABRICKS_STAGING_CLIENT_ID` | `<staging-service-principal-application-id>` | staging jobs |
+
+**What you supply to make it actually run** — for **each** of `staging` and `prod` (the steps
+are identical; only the environment name and SP differ):
+
+1. **Create a service principal** and put its application ID in the matching variable in
    `databricks.yml` (`staging_service_principal` / `prod_service_principal`).
 2. **Grant the SP** `USE CATALOG, CREATE SCHEMA` on that environment's catalog. (Prod also
    declares a `CAN_MANAGE` `permissions` lock in `databricks.yml`; staging is left open for
    easy debugging.)
 3. **Create the SP's federation policy** trusting GitHub's OIDC issuer, scoped to **your**
    `repo:<org>/<repo>:environment:staging` (or `:environment:prod`).
-4. **In GitHub:** create an Environment of that name (add required reviewers to `prod` for
-   change control), and add its repository variables — both are identifiers, not secrets:
-   - `prod`: `DATABRICKS_HOST`, `DATABRICKS_CLIENT_ID`
-   - `staging`: `DATABRICKS_STAGING_HOST`, `DATABRICKS_STAGING_CLIENT_ID`
+4. **Replace the placeholder GitHub variables** with real values — set the host to your
+   workspace URL and the client ID to the SP's application ID:
+
+   ```bash
+   gh variable set DATABRICKS_STAGING_HOST      --body "https://<your-staging-workspace>.cloud.databricks.com"
+   gh variable set DATABRICKS_STAGING_CLIENT_ID --body "<your-staging-sp-app-id>"
+   gh variable set DATABRICKS_HOST              --body "https://<your-prod-workspace>.cloud.databricks.com"
+   gh variable set DATABRICKS_CLIENT_ID         --body "<your-prod-sp-app-id>"
+   ```
+
+   > These are set at the **repository** level (readable by every job). To harden further,
+   > move each pair to its matching **Environment** scope instead — `vars.*` resolves at
+   > either level, so no workflow change is needed.
 
 Then the pipeline runs itself: **open a PR** → `ci.yml` tests + validates; **merge to `main`**
-→ `deploy.yml` deploys/tests staging, then (after approval) deploys/runs prod — all as the
-SPs, with no stored secret.
+→ `deploy.yml` deploys/tests staging, then (after `prod` approval) deploys/runs prod — all as
+the SPs, with no stored secret.
 
-Exact CLI commands and a worked example are in
+Steps 1–3 need account-admin rights. Exact CLI commands and a worked example are in
 [`docs/prod-oidc-deploy.md`](docs/prod-oidc-deploy.md).
 
 ### 6. Operate
