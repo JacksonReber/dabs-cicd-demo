@@ -24,13 +24,19 @@ variables:
   prod_service_principal:
     description: Application ID of the service principal that runs the prod pipeline.
     default: "<prod-service-principal-application-id>"
+  staging_service_principal:
+    description: >-
+      Application ID of the service principal that deploys and runs the staging
+      pipeline from CI. Staging is a stable, CI-owned environment (not a personal
+      dev target), so it gets its own SP just like prod.
+    default: "<staging-service-principal-application-id>"
 
 targets:
-  # dev & staging run in DEVELOPMENT mode: each developer deploys to their OWN
-  # workspace home (/Workspace/Users/<them>/.bundle/${bundle.name}/${bundle.target})
-  # and the pipeline runs as that developer — so developers never overwrite each
-  # other's deployments. No `root_path` or `run_as` is needed here; that isolation
-  # is the development-mode default. Resources are also prefixed with [dev <user>].
+  # dev runs in DEVELOPMENT mode: each developer deploys to their OWN workspace home
+  # (/Workspace/Users/<them>/.bundle/${bundle.name}/${bundle.target}) and the pipeline
+  # runs as that developer — so developers never overwrite each other's deployments.
+  # No `root_path` or `run_as` is needed here; that isolation is the development-mode
+  # default. Resources are also prefixed with [dev <user>].
   dev:
     mode: development
     default: true
@@ -39,14 +45,25 @@ targets:
     variables:
       quality_threshold: "0"
 
+  # staging is a STABLE, CI-OWNED environment — not a personal dev target. It mirrors
+  # prod's identity model (its own service principal deploys AND runs it, via GitHub
+  # OIDC), so integration tests run against a shared, reproducible deployment rather
+  # than whichever developer last deployed. This is why it is NOT `mode: development`:
+  # we want deterministic, un-prefixed resource names and SP-owned files, exactly like
+  # prod. (mlops-stacks follows the same split — only `dev` is development mode.)
+  #
+  # It is intentionally NOT hardened with a `permissions` lock like prod: staging is a
+  # test bed, so leaving it broadly manageable keeps debugging friction low.
   staging:
-    mode: development
     workspace:
       host: https://<staging-workspace>.cloud.databricks.com
+      root_path: /Workspace/Users/${var.staging_service_principal}/.bundle/${bundle.name}/${bundle.target}
+    run_as:
+      service_principal_name: ${var.staging_service_principal}
     variables:
       quality_threshold: "5000"
 
-  # Personal sandbox workspace. Same DEVELOPMENT-mode isolation as dev/staging, but this
+  # Personal sandbox workspace. Same DEVELOPMENT-mode isolation as dev, but this
   # workspace has no dabs_cicd_* catalog, so the catalog var is overridden to an
   # existing catalog (the ad-hoc pattern the `catalog` variable doc calls out).
   sandbox:
@@ -74,6 +91,12 @@ targets:
   #   never on a laptop) + Git as the source of truth + audit logs — not ACLs alone.
   prod:
     mode: production
+    # Pin the branch prod is allowed to deploy from. In production mode the CLI
+    # validates that the deploy is running against this branch and refuses otherwise,
+    # so a bundle can only reach prod through the intended release branch (`main`
+    # here) — not from an arbitrary feature branch or a stale local checkout.
+    git:
+      branch: main
     workspace:
       host: https://<prod-workspace>.cloud.databricks.com
       root_path: /Workspace/Users/${var.prod_service_principal}/.bundle/${bundle.name}/${bundle.target}

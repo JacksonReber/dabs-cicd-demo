@@ -1,0 +1,77 @@
+# CI gate for pull requests: run the unit tests, then validate the bundle config
+# against every deployable target. Nothing here deploys or mutates a workspace — it
+# is purely the "is this change safe to merge?" check.
+#
+# This is the missing first half of the validate → deploy → run lifecycle: a broken
+# bundle or a failing test now fails the PR instead of sailing through to a deploy.
+# Structure mirrors databricks/mlops-stacks (a unit-test job + a per-target
+# `bundle validate` job); auth is adapted to this repo's secret-less GitHub OIDC.
+#
+# Refs:
+#   - https://github.com/databricks/mlops-stacks (bundle-ci / run-tests workflows)
+#   - https://docs.databricks.com/aws/en/dev-tools/ci-cd/github
+
+name: ci
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  # --- Unit tests: pure-Python, no workspace needed -------------------------------
+  # Exercises the shared `libraries/` package (get_conf, parse_threshold, naming
+  # helpers). Fast, hermetic, and the first thing to fail on a bad change.
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+      - name: Run pytest
+        run: pytest
+
+  # --- Bundle validation: one job per deployable target ---------------------------
+  # `bundle validate` type-checks the config and resolves every ${var...} / target
+  # override, so target-specific mistakes (a bad substitution, a resource that only
+  # breaks under prod's overrides) surface on the PR. `sandbox` is intentionally
+  # omitted — it is a personal ad-hoc target, not part of the promotion path.
+  #
+  # Each target authenticates as its own service principal via OIDC. `validate` reads
+  # config only (no writes), but the CLI still needs a workspace identity to resolve
+  # against. The matrix maps each target to its GitHub Environment so the OIDC subject
+  # matches that environment's federation policy.
+  validate:
+    needs: unit-tests
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: staging
+            environment: staging
+            client_id_var: DATABRICKS_STAGING_CLIENT_ID
+            host_var: DATABRICKS_STAGING_HOST
+          - target: prod
+            environment: prod
+            client_id_var: DATABRICKS_CLIENT_ID
+            host_var: DATABRICKS_HOST
+    environment: ${{ matrix.environment }}
+    permissions:
+      id-token: write   # mint the GitHub OIDC token
+      contents: read
+    env:
+      DATABRICKS_AUTH_TYPE: github-oidc
+      DATABRICKS_HOST: ${{ vars[matrix.host_var] }}
+      DATABRICKS_CLIENT_ID: ${{ vars[matrix.client_id_var] }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: databricks/setup-cli@main
+      - name: Validate bundle (${{ matrix.target }})
+        run: databricks bundle validate -t ${{ matrix.target }}
