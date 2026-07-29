@@ -100,7 +100,7 @@ because it no-ops on serverless.
 
 ### Environments, identity, and deploy location
 
-Two separate workspaces (a single workspace also works — just point every target at it).
+Two separate workspaces — one for dev, one for prod.
 
 | Target | Mode | catalog | run_as | Deploys to (`root_path`) |
 |--------|------|---------|--------|--------------------------|
@@ -209,36 +209,39 @@ worked example, and the honest "what was tested vs. referenced" notes are in
 
 ## Standing it up end-to-end
 
-The code (`databricks.yml`, `ci.yml`, `deploy.yml`) is committed and runnable. What you supply is what *can't* be committed: workspace URLs, the prod service principal, its OIDC trust policy, and the GitHub-side Environment + variables.
+This repo is a **reference to adapt**, not a template to run as-is. The code
+(`databricks.yml`, `ci.yml`, `deploy.yml`) is committed and runnable, but read it as an
+example — not every choice here maps to your use case. What you supply is what *can't* be
+committed: workspace URLs, the prod service principal, its OIDC trust policy, and the
+GitHub-side Environment + variables.
 
-Ordered easiest-first. Stop after step 4 for local dev. Steps 5 and 6 add hardened, CI-deployed prod.
+Ordered easiest-first. Stop after step 3 for local dev. Steps 4–6 add hardened, CI-deployed prod.
 
 ### 1. Prerequisites
 
-- [Databricks CLI](https://docs.databricks.com/aws/en/dev-tools/cli/install) installed and authenticated.
-- At least one workspace. Two for fully separated dev / prod.
-- Rights to create catalogs/schemas in each target's catalog, or an existing catalog to point at (step 3).
-- Prod CI path only: account-admin rights to create a service principal + federation policy.
+- **DABs** — authored via the [Databricks CLI](https://docs.databricks.com/aws/en/dev-tools/cli/install) or the Databricks UI. The commands below use the CLI (installed and authenticated).
+- **Two workspaces** — one for dev, one for prod. (This reference assumes separated dev / prod; collapsing them into one is possible but not the path shown here.)
+- **Permissions** to create catalogs/schemas and to run the pipeline/jobs in each target's workspace — or an existing catalog to point at (step 2).
+- **Prod CI path only:** account-admin rights to create a service principal + federation policy.
 
-### 2. Get the code and test
+### 2. Point the bundle at your workspaces
 
-Treat this repo as an example to adapt — copy it into your own repo (clone this one, or drop these files into a repo you control). The CI path in step 5 needs a repo you own, because the OIDC federation policy is scoped to it.
-
-```bash
-git clone <this-repo-url> dabs-cicd-demo && cd dabs-cicd-demo
-pip install -e ".[dev]"
-pytest                      # confirms the shared library works before touching any workspace
-```
-
-### 3. Point the bundle at your workspaces
-
-Placeholders to replace in `databricks.yml`:
+Open `databricks.yml` and **read it closely** — it encodes specific choices (derived
+variables, a hardened prod target, a `sandbox` example) that you should keep, drop, or
+adjust for your own setup. At minimum, replace these placeholders:
 
 - `workspace.host` on each target. Swap the `<…-workspace>` values for real workspace URLs.
 - Catalogs: default to `dabs_cicd_<env>`. If those don't exist, create them, override per target (see the `sandbox` target), or pass `--var catalog=<existing_catalog>` at deploy time.
-- `prod_service_principal`. Filled in step 5.
+- `prod_service_principal`. Filled in step 4.
 
-### 4. Deploy dev yourself
+Then confirm the shared library works before touching any workspace:
+
+```bash
+pip install -e ".[dev]"
+pytest                      # unit tests for the libraries/ helpers — fast, no workspace needed
+```
+
+### 3. Build and deploy your bundle in dev
 
 Fastest path to "it works". Runs in development mode as you, in your own workspace home. No service principal or CI.
 
@@ -248,13 +251,31 @@ databricks bundle deploy   -t dev
 databricks bundle run dabs_cicd_pipeline -t dev
 ```
 
-Proves the pipeline end-to-end before any SP/OIDC machinery. Prod is CI-owned and deploys as a service principal (step 5), not by hand.
+Proves the pipeline end-to-end before any SP/OIDC machinery. Prod is CI-owned and deploys as a service principal (steps 4–5), not by hand.
 
-### 5. Wire up the prod CI environment
+### 4. Create the prod service principal (account-admin)
 
-Prod authenticates from GitHub Actions as its own service principal via OIDC. This needs GitHub-side setup **and** Databricks-side setup.
+The Databricks-side identity work. In CI, the SP both **authenticates the deploy** (so it
+owns the workspace files) and **runs** the pipeline.
 
-> **The GitHub Environment and variables live in repo settings, not in the code — copying the files does NOT copy them.** A repo you just populated with this code starts with **zero** Environments and **zero** variables; you create them below. Don't assume they came across with `git clone`.
+**a. Create the service principal.** Put its application ID in the `prod_service_principal`
+variable in `databricks.yml`.
+
+**b. Grant the SP** `USE CATALOG, CREATE SCHEMA` on the prod catalog, so it can create the
+medallion schemas. (Prod also declares a `CAN_MANAGE` `permissions` lock in `databricks.yml`
+— the SP manages the deployment, everyone else is read-only.)
+
+**c. Create the SP's federation policy.** Trusts GitHub's OIDC issuer, scoped to
+`repo:<org>/<repo>:environment:prod` — this is what lets GitHub authenticate *as the SP*
+with no stored secret. The subject references the `prod` **Environment** you create in
+step 5, so the two are linked.
+
+Exact CLI commands + a worked example (and the OAuth M2M secret alternative to OIDC) are in
+[`docs/prod-oidc-deploy.md`](docs/prod-oidc-deploy.md).
+
+### 5. Wire up the prod CI environment (GitHub side)
+
+> **GitHub Environments and variables live in repo settings, not in the code — copying the files does NOT copy them.** A repo you just populated with this code starts with **zero** Environments and **zero** variables; you create them below.
 
 **a. Create the `prod` GitHub Environment**, then attach required-reviewer protection to it — this is the human approval gate before `deploy.yml` touches prod.
 
@@ -273,15 +294,9 @@ gh api -X PUT repos/<org>/<repo>/environments/prod \
   -F "deployment_branch_policy[custom_branch_policies]=false"
 ```
 
-**b. Create the prod service principal** (account-admin). Put its application ID in the `prod_service_principal` variable in `databricks.yml`.
+**b. Set the two GitHub variables.** Identifiers, not secrets, so plain **variables** (not secrets) — workflows read them via `vars.*`.
 
-**c. Grant the SP** `USE CATALOG, CREATE SCHEMA` on the prod catalog. (Prod also declares a `CAN_MANAGE` `permissions` lock in `databricks.yml`.)
-
-**d. Create the SP's federation policy** (account-admin). Trusts GitHub's OIDC issuer, scoped to `repo:<org>/<repo>:environment:prod`.
-
-**e. Set the two GitHub variables.** Identifiers, not secrets, so plain **variables** (not secrets) — workflows read them via `vars.*`.
-
-*UI:* **Settings → Secrets and variables → Actions → Variables tab → New repository variable**. Add `DATABRICKS_HOST` (your prod workspace URL) and `DATABRICKS_CLIENT_ID` (the prod SP's application ID). Use the **Variables** tab, not **Secrets** — `vars.*` won't read a secret.
+*UI:* **Settings → Secrets and variables → Actions → Variables tab → New repository variable**. Add `DATABRICKS_HOST` (your prod workspace URL) and `DATABRICKS_CLIENT_ID` (the prod SP's application ID from step 4). Use the **Variables** tab, not **Secrets** — `vars.*` won't read a secret.
 
 *API (`gh`):* `gh variable set` creates them if absent, updates them if present:
 
@@ -292,20 +307,28 @@ gh variable set DATABRICKS_CLIENT_ID --body "<your-prod-sp-app-id>"
 
 > Scoping to the environment instead of the repo: in the UI pick the `prod` environment on the New-variable dialog; with `gh`, add `--env prod`. `vars.*` resolves at either level (see "Variable scope is repo-level" in Caveats).
 
-Exact CLI commands + a worked example are in [`docs/prod-oidc-deploy.md`](docs/prod-oidc-deploy.md).
+### 6. Test the end-to-end flow
 
-Then the pipeline runs itself. Open a PR → `ci.yml` tests + validates. Merge to `main` → `deploy.yml` deploys/runs prod after the `prod` Environment approval. All as the SP, no stored secret.
+With steps 4–5 done, the CI/CD path runs itself — no manual deploys to prod:
 
-### 6. Operate
+- **Open a PR** → `ci.yml` runs the unit tests and `databricks bundle validate` against prod. A broken bundle or failing test blocks the merge.
+- **Merge to `main`** → `deploy.yml` deploys and runs the pipeline in prod, **after** the `prod` Environment's required reviewers approve. All as the SP, no stored secret.
 
-- Scheduled job (`resources/jobs.yml`) ships PAUSED in every environment. Remove the explicit `pause_status: PAUSED` line to restore dev-paused / prod-unpaused behavior.
+Housekeeping:
+
+- The scheduled job (`resources/jobs.yml`) ships **PAUSED** in every environment. Remove the explicit `pause_status: PAUSED` line to restore dev-paused / prod-unpaused behavior.
 - Tear down any target: `databricks bundle destroy -t <target>`.
 
 ### Caveats and decisions
 
-Things to weigh before running this for real:
+This is a reference, so the list below is less "gotchas" and more "**decisions you'll likely
+make differently** for your own use case." Each item is a choice this repo made one way and
+you might make another.
 
 - **Merging to `main` costs compute.** `deploy.yml` deploys *and runs* the pipeline in prod on every merge. Serverless spins up each time. The prod schedule ships paused, but the CI-triggered `bundle run` is not.
+- **Deploy-and-run vs. deploy-only in CI.** This repo runs the pipeline in CI so a merge visibly produces data — good for a demo, but it burns compute and asserts nothing about correctness. Many teams deploy from CI and let the *schedule* (or a separate trigger) run the pipeline, keeping CI cheap and fast. To do that, drop the `bundle run` step from `deploy.yml` and unpause the schedule in `resources/jobs.yml`.
+- **One workspace vs. separate dev/prod workspaces.** This reference assumes two workspaces (dev, prod) for real isolation. You *can* collapse to a single workspace by pointing every target's `workspace.host` at it and relying on the per-env catalogs (`dabs_cicd_<env>`) for separation — lower fidelity, but fine for a quick trial.
+- **OIDC vs. an OAuth M2M secret for the prod deploy.** This repo uses OIDC (no stored secret). If your CI can't use GitHub OIDC, a service-principal OAuth M2M secret authenticates the same deploy *as the SP* with the same file-ownership outcome — you just store and rotate a secret. Both are covered in [`docs/prod-oidc-deploy.md`](docs/prod-oidc-deploy.md).
 - **No pre-prod stage — you may want to add staging.** This reference deploys `dev` locally and `prod` from CI, with nothing between. A production-grade setup usually promotes through a stable, CI-owned **staging** environment first: deploy + integration-test staging, and reach prod only if it passes. To add one, mirror the prod setup:
   - **`databricks.yml`** — add a `staging` target with its own `staging_service_principal` variable, `run_as` that SP, and an SP-home `root_path` (copy the prod block, but skip `mode: production`, the `git.branch` pin, and the hardened `permissions` lock — staging is a test bed, so leave it broadly manageable for easy debugging). Set its own `quality_threshold`.
   - **`ci.yml`** — add a `staging` entry to the `validate` matrix (target + environment + its host/client-id var names).
