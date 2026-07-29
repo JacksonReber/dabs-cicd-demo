@@ -258,11 +258,19 @@ Prod authenticates from GitHub Actions as its own service principal via OIDC. Th
 
 **a. Create the `prod` GitHub Environment**, then attach required-reviewer protection to it — this is the human approval gate before `deploy.yml` touches prod.
 
+*UI:* **Settings → Environments → New environment**, name it `prod`. Then, on the environment's page, tick **Required reviewers** and add the people/teams who must approve a prod deploy. (Optionally set **Deployment branches** to `Selected branches` → `main` so only `main` can deploy.)
+
+*API (`gh`):* create the environment, and set required reviewers in the same call by passing a body. Reviewers are given by numeric **id** (`type: User` or `type: Team`) — look up a user id with `gh api users/<login> -q .id`:
+
 ```bash
+# Bare create (no protection yet):
 gh api -X PUT repos/<org>/<repo>/environments/prod
-# Required reviewers can't be set in that one call — add them in the GitHub UI:
-# Settings → Environments → prod → Required reviewers. (Or via the deployment-
-# branch-policies / reviewers REST fields.)
+
+# Or create WITH a required reviewer (replace 1234567 with a real user/team id):
+gh api -X PUT repos/<org>/<repo>/environments/prod \
+  -F "reviewers[][type]=User" -F "reviewers[][id]=1234567" \
+  -F "deployment_branch_policy[protected_branches]=true" \
+  -F "deployment_branch_policy[custom_branch_policies]=false"
 ```
 
 **b. Create the prod service principal** (account-admin). Put its application ID in the `prod_service_principal` variable in `databricks.yml`.
@@ -271,12 +279,18 @@ gh api -X PUT repos/<org>/<repo>/environments/prod
 
 **d. Create the SP's federation policy** (account-admin). Trusts GitHub's OIDC issuer, scoped to `repo:<org>/<repo>:environment:prod`.
 
-**e. Set the two GitHub variables** (`gh variable set` creates them if absent). Identifiers, not secrets, so plain variables — workflows read them via `vars.*`:
+**e. Set the two GitHub variables.** Identifiers, not secrets, so plain **variables** (not secrets) — workflows read them via `vars.*`.
+
+*UI:* **Settings → Secrets and variables → Actions → Variables tab → New repository variable**. Add `DATABRICKS_HOST` (your prod workspace URL) and `DATABRICKS_CLIENT_ID` (the prod SP's application ID). Use the **Variables** tab, not **Secrets** — `vars.*` won't read a secret.
+
+*API (`gh`):* `gh variable set` creates them if absent, updates them if present:
 
 ```bash
 gh variable set DATABRICKS_HOST      --body "https://<your-prod-workspace>.cloud.databricks.com"
 gh variable set DATABRICKS_CLIENT_ID --body "<your-prod-sp-app-id>"
 ```
+
+> Scoping to the environment instead of the repo: in the UI pick the `prod` environment on the New-variable dialog; with `gh`, add `--env prod`. `vars.*` resolves at either level (see "Variable scope is repo-level" in Caveats).
 
 Exact CLI commands + a worked example are in [`docs/prod-oidc-deploy.md`](docs/prod-oidc-deploy.md).
 
