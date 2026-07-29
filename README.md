@@ -209,7 +209,7 @@ worked example, and the honest "what was tested vs. referenced" notes are in
 
 ## Standing it up end-to-end
 
-The code (`databricks.yml`, `ci.yml`, `deploy.yml`) is committed and runnable. What you supply is what *can't* be committed: your fork, workspace URLs, the prod service principal, its OIDC trust policy, and the GitHub-side Environment + variables.
+The code (`databricks.yml`, `ci.yml`, `deploy.yml`) is committed and runnable. What you supply is what *can't* be committed: workspace URLs, the prod service principal, its OIDC trust policy, and the GitHub-side Environment + variables.
 
 Ordered easiest-first. Stop after step 4 for local dev. Steps 5 and 6 add hardened, CI-deployed prod.
 
@@ -220,11 +220,12 @@ Ordered easiest-first. Stop after step 4 for local dev. Steps 5 and 6 add harden
 - Rights to create catalogs/schemas in each target's catalog, or an existing catalog to point at (step 3).
 - Prod CI path only: account-admin rights to create a service principal + federation policy.
 
-### 2. Fork, clone, and test
+### 2. Get the code and test
+
+Treat this repo as an example to adapt — copy it into your own repo (clone this one, or drop these files into a repo you control). The CI path in step 5 needs a repo you own, because the OIDC federation policy is scoped to it.
 
 ```bash
-# Fork the repo first (the OIDC federation policy in step 5 is scoped to YOUR repo).
-gh repo fork <upstream-org>/dabs-cicd-demo --clone && cd dabs-cicd-demo
+git clone <this-repo-url> dabs-cicd-demo && cd dabs-cicd-demo
 pip install -e ".[dev]"
 pytest                      # confirms the shared library works before touching any workspace
 ```
@@ -253,7 +254,7 @@ Proves the pipeline end-to-end before any SP/OIDC machinery. Prod is CI-owned an
 
 Prod authenticates from GitHub Actions as its own service principal via OIDC. This needs GitHub-side setup **and** Databricks-side setup.
 
-> **The GitHub Environment and variables live in repo settings, not in the code — a clone or fork does NOT copy them.** A fresh fork starts with **zero** Environments and **zero** variables; you create them below. Don't assume they came across with `git clone`.
+> **The GitHub Environment and variables live in repo settings, not in the code — copying the files does NOT copy them.** A repo you just populated with this code starts with **zero** Environments and **zero** variables; you create them below. Don't assume they came across with `git clone`.
 
 **a. Create the `prod` GitHub Environment**, then attach required-reviewer protection to it — this is the human approval gate before `deploy.yml` touches prod.
 
