@@ -23,6 +23,7 @@ variables:
     description: Minimum trade_value a row must meet to pass the silver layer.
   prod_service_principal:
     description: Application ID of the service principal that runs the prod pipeline.
+    # REPLACE: the prod SP's application ID (a UUID), created in README step 4.
     default: "<prod-service-principal-application-id>"
 
 targets:
@@ -35,7 +36,7 @@ targets:
     mode: development
     default: true
     workspace:
-      host: https://<dev-workspace>.cloud.databricks.com
+      host: https://<dev-workspace>.cloud.databricks.com   # REPLACE: your dev workspace URL
     variables:
       quality_threshold: "0"
 
@@ -45,9 +46,9 @@ targets:
   sandbox:
     mode: development
     workspace:
-      host: https://<sandbox-workspace>.cloud.databricks.com
+      host: https://<sandbox-workspace>.cloud.databricks.com   # REPLACE: your sandbox workspace URL (or delete this whole target)
     variables:
-      catalog: sandbox_catalog
+      catalog: sandbox_catalog   # REPLACE: an existing catalog in that workspace (overrides the derived dabs_cicd_sandbox)
       quality_threshold: "0"
 
   # prod runs in PRODUCTION mode and is HARDENED so the deployed bundle artifacts
@@ -74,7 +75,8 @@ targets:
     git:
       branch: main
     workspace:
-      host: https://<prod-workspace>.cloud.databricks.com
+      host: https://<prod-workspace>.cloud.databricks.com   # REPLACE: your prod workspace URL
+      # root_path resolves from prod_service_principal (set above) — no edit needed here.
       root_path: /Workspace/Users/${var.prod_service_principal}/.bundle/${bundle.name}/${bundle.target}
     run_as:
       service_principal_name: ${var.prod_service_principal}
