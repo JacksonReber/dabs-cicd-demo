@@ -1,17 +1,16 @@
-# CD promotion pipeline: on merge to `main`, deploy + integration-test STAGING, and
-# only if that succeeds, deploy + run PROD (behind the `prod` Environment's approval
-# gate). This is the second half of the validate → deploy → run lifecycle, and the
-# promotion order best practice calls for: staging first, prod only after it passes.
+# CD pipeline: on merge to `main`, deploy + run PROD, behind the `prod` Environment's
+# approval gate. This is the second half of the validate → deploy → run lifecycle
+# (the first half, PR validation, is ci.yml).
 #
-# Why one workflow with `needs:` instead of two independent ones: it makes the gate
-# explicit and enforceable — prod literally cannot start until staging deploys and its
-# pipeline run succeeds. (databricks/mlops-stacks splits staging vs prod by branch —
-# `main` → staging, `release` → prod. This repo keeps a single protected branch and
-# chains the jobs instead, which is a cleaner fit for one repo + approval gates.)
+# This repo deploys straight to prod on merge. A production-grade setup usually
+# promotes through a stable pre-prod environment first (deploy + integration-test
+# STAGING, then prod only if it passes). Staging was intentionally left out here to
+# keep the reference minimal — the README "Caveats and decisions" section explains
+# exactly how to add a staging stage back (a second job gated with `needs:`).
 #
-# Both environments authenticate as their OWN service principal via GitHub OIDC — no
-# stored Databricks secret. See docs/prod-oidc-deploy.md for the one-time SP +
-# federation-policy setup (staging needs the same setup, scoped to `:environment:staging`).
+# Prod authenticates as its OWN service principal via GitHub OIDC — no stored
+# Databricks secret. See docs/prod-oidc-deploy.md for the one-time SP +
+# federation-policy setup.
 #
 # NOTE: this workflow is a reference deliverable. It has not been executed against the
 # internal sandbox environment, which enforces a corp-egress-only IP ACL that 403s
@@ -19,7 +18,7 @@
 # no such ACL, or use a self-hosted runner inside the allowed network.
 #
 # Refs:
-#   - https://github.com/databricks/mlops-stacks (bundle-cd-staging / bundle-cd-prod)
+#   - https://github.com/databricks/mlops-stacks (bundle-cd-prod)
 #   - https://docs.databricks.com/aws/en/dev-tools/ci-cd/github
 
 name: deploy
@@ -33,49 +32,26 @@ permissions:
   contents: read
 
 jobs:
-  # --- STAGING: deploy + integration test -----------------------------------------
-  # Runs unconditionally on merge. Deploys as the staging SP, then `bundle run`
-  # executes the pipeline end-to-end — that run IS the integration test: if the
-  # medallion pipeline can't build in a real workspace, staging fails and prod is
-  # never reached.
-  deploy-staging:
-    runs-on: ubuntu-latest
-    concurrency: dabs-cicd-staging   # never overlap two staging deploys
-    environment: staging
-    permissions:
-      id-token: write
-      contents: read
-    env:
-      DATABRICKS_AUTH_TYPE: github-oidc
-      DATABRICKS_HOST: ${{ vars.DATABRICKS_STAGING_HOST }}
-      DATABRICKS_CLIENT_ID: ${{ vars.DATABRICKS_STAGING_CLIENT_ID }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: databricks/setup-cli@main
-      - name: Validate bundle (staging)
-        run: databricks bundle validate -t staging
-      - name: Deploy bundle (staging)
-        run: databricks bundle deploy -t staging
-      - name: Run pipeline (staging) — integration test
-        run: databricks bundle run dabs_cicd_pipeline -t staging
-
-  # --- PROD: deploy + run, gated on staging ---------------------------------------
-  # `needs: deploy-staging` is the hard gate — prod does not start unless staging fully
-  # succeeded. The `prod` GitHub Environment adds the human approval gate on top (attach
-  # required reviewers there). Deploys as the prod SP; the prod target is hardened
-  # (SP-owned files, permissions lock, git.branch: main) in databricks.yml.
+  # --- PROD: deploy + run ----------------------------------------------------------
+  # Runs on merge to `main`. The `prod` GitHub Environment provides the human approval
+  # gate (attach required reviewers there). Deploys as the prod SP; the prod target is
+  # hardened (SP-owned files, permissions lock, git.branch: main) in databricks.yml.
   deploy-prod:
-    needs: deploy-staging
     runs-on: ubuntu-latest
     concurrency: dabs-cicd-prod
     environment: prod
+    # Scopes this job's GITHUB_TOKEN (declaring a block sets all unlisted perms to none = least privilege).
     permissions:
-      id-token: write
-      contents: read
+      id-token: write   # REQUIRED: mint the GitHub OIDC token that Databricks exchanges for SP auth
+      contents: read    # let actions/checkout clone the repo
     env:
       DATABRICKS_AUTH_TYPE: github-oidc
-      DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
-      DATABRICKS_CLIENT_ID: ${{ vars.DATABRICKS_CLIENT_ID }}
+      # `vars.*` reads GitHub Actions configuration variables — set them in the GitHub UI
+      # (Settings → Secrets and variables → Actions → Variables) or via `gh variable set`.
+      # They live in THIS repo's GitHub settings, not in the code, so a clone/fork does NOT
+      # copy them; if unset, `vars.*` is empty and the deploy fails at auth.
+      DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}        # config variable: prod workspace URL
+      DATABRICKS_CLIENT_ID: ${{ vars.DATABRICKS_CLIENT_ID }} # config variable: prod SP application ID (an identifier, not a secret)
     steps:
       - uses: actions/checkout@v4
       - uses: databricks/setup-cli@main

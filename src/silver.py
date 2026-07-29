@@ -1,7 +1,7 @@
 """Silver layer — clean trades and apply the variable-driven quality filter.
 
 `quality_threshold` is read from pipeline configuration. Different values per
-target (dev/staging/prod) change how many rows survive, so deploying to a
+target (dev/prod) change how many rows survive, so deploying to a
 different environment visibly changes the output with no code change.
 """
 
