@@ -5,8 +5,8 @@ include:
   - resources/*.yml
 
 # Variables are declared once. `catalog` and `env` are DERIVED from the target
-# name (${bundle.target} = dev | staging | prod), so standing up or maintaining
-# an environment is just adding a target — there is no per-env catalog/env wiring
+# name (${bundle.target} = dev | prod), so standing up or maintaining an
+# environment is just adding a target — there is no per-env catalog/env wiring
 # to keep in sync. `quality_threshold` stays per-target because it is a genuine
 # per-env policy knob, not something derivable from the name.
 variables:
@@ -24,12 +24,6 @@ variables:
   prod_service_principal:
     description: Application ID of the service principal that runs the prod pipeline.
     default: "<prod-service-principal-application-id>"
-  staging_service_principal:
-    description: >-
-      Application ID of the service principal that deploys and runs the staging
-      pipeline from CI. Staging is a stable, CI-owned environment (not a personal
-      dev target), so it gets its own SP just like prod.
-    default: "<staging-service-principal-application-id>"
 
 targets:
   # dev runs in DEVELOPMENT mode: each developer deploys to their OWN workspace home
@@ -44,24 +38,6 @@ targets:
       host: https://<dev-workspace>.cloud.databricks.com
     variables:
       quality_threshold: "0"
-
-  # staging is a STABLE, CI-OWNED environment — not a personal dev target. It mirrors
-  # prod's identity model (its own service principal deploys AND runs it, via GitHub
-  # OIDC), so integration tests run against a shared, reproducible deployment rather
-  # than whichever developer last deployed. This is why it is NOT `mode: development`:
-  # we want deterministic, un-prefixed resource names and SP-owned files, exactly like
-  # prod. (mlops-stacks follows the same split — only `dev` is development mode.)
-  #
-  # It is intentionally NOT hardened with a `permissions` lock like prod: staging is a
-  # test bed, so leaving it broadly manageable keeps debugging friction low.
-  staging:
-    workspace:
-      host: https://<staging-workspace>.cloud.databricks.com
-      root_path: /Workspace/Users/${var.staging_service_principal}/.bundle/${bundle.name}/${bundle.target}
-    run_as:
-      service_principal_name: ${var.staging_service_principal}
-    variables:
-      quality_threshold: "5000"
 
   # Personal sandbox workspace. Same DEVELOPMENT-mode isolation as dev, but this
   # workspace has no dabs_cicd_* catalog, so the catalog var is overridden to an

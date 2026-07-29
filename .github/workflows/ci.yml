@@ -43,10 +43,13 @@ jobs:
   # breaks under prod's overrides) surface on the PR. `sandbox` is intentionally
   # omitted — it is a personal ad-hoc target, not part of the promotion path.
   #
-  # Each target authenticates as its own service principal via OIDC. `validate` reads
-  # config only (no writes), but the CLI still needs a workspace identity to resolve
-  # against. The matrix maps each target to its GitHub Environment so the OIDC subject
-  # matches that environment's federation policy.
+  # This is kept as a MATRIX (with a single `prod` entry today) so adding another
+  # CI-owned target — e.g. a staging environment, see the README "Caveats and
+  # decisions" — is one more list item: give it a GitHub Environment and its own
+  # host/client-id variables. Each target authenticates as its own service principal
+  # via OIDC; `validate` reads config only (no writes), but the CLI still needs a
+  # workspace identity to resolve against, and the matrix maps each target to the
+  # GitHub Environment whose federation policy matches the OIDC subject.
   validate:
     needs: unit-tests
     runs-on: ubuntu-latest
@@ -54,10 +57,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - target: staging
-            environment: staging
-            client_id_var: DATABRICKS_STAGING_CLIENT_ID
-            host_var: DATABRICKS_STAGING_HOST
           - target: prod
             environment: prod
             client_id_var: DATABRICKS_CLIENT_ID
