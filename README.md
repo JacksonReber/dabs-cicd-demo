@@ -105,7 +105,7 @@ Two separate workspaces — one for dev, one for prod.
 | Target | Mode | catalog | run_as | Deploys to (`root_path`) |
 |--------|------|---------|--------|--------------------------|
 | dev (default) | development | dabs_cicd_dev | the deploying developer | that developer's home (`/Workspace/Users/<dev>/.bundle/...`) |
-| prod | production | dabs_cicd_prod | a **prod service principal** | the SP's home (`/Workspace/Users/<prod-sp>/.bundle/...`) |
+| prod | production | dabs_cicd_prod | a **run service principal** | the **deploy SP's** home (`/Workspace/Users/<deploy-sp>/.bundle/...`) |
 
 Why this matters:
 
@@ -113,10 +113,13 @@ Why this matters:
   shared dev work: each developer deploys to their **own** workspace home and the pipeline
   **runs as that developer**, so developers never overwrite each other. No `root_path` or
   `run_as` is configured — it's the mode default.
-- **prod** uses **production mode**: it runs as a **service principal** (not any
-  individual), deploys to that SP's identity-neutral home, pins `git.branch: main` so it
-  can only deploy from the release branch, and locks the deployment with `permissions`. In
-  CI/CD the same SP performs the deploy, so the SP — not a human — owns the files.
+- **prod** uses **production mode** with **two service principals** — the least-privilege
+  split Databricks recommends. A **deploy SP** authenticates CI/CD (so it owns the files
+  and holds `CAN_MANAGE` — the tamper-proofing) but has no data grants; a separate **run
+  SP** is the `run_as` identity, holding the Unity Catalog data grants and `CAN_RUN` but
+  never `CAN_MANAGE`. Prod also pins `git.branch: main` so it can only deploy from the
+  release branch. See [`docs/prod-oidc-deploy.md`](docs/prod-oidc-deploy.md) for the full
+  two-SP setup, the three-tier permission model, and what was tested.
 
 > **No pre-prod stage here.** This reference deploys `dev` locally and `prod` from CI, with
 > nothing in between. A production-grade setup usually adds a stable, CI-owned **staging**
@@ -161,17 +164,18 @@ stored in GitHub**:
 2. A **federation policy** on the prod service principal trusts that token, scoped to this
    exact repo + environment (`repo:<org>/<repo>:environment:prod`).
 3. The Databricks CLI exchanges the OIDC token for a short-lived Databricks token and
-   deploys **as the SP** (`DATABRICKS_AUTH_TYPE: github-oidc`).
+   deploys **as the deploy SP** (`DATABRICKS_AUTH_TYPE: github-oidc`).
 
-Why OIDC matters *for this project*: because the **SP authenticates the deploy, the SP owns
-the deployed workspace files** — no human does. That is what makes the prod hardening in
-`databricks.yml` (identity-neutral `root_path`, `run_as` the SP, `CAN_VIEW`-only for everyone
-else) actually hold. And since the token is minted per-run and never stored, there is no
-long-lived secret to leak or rotate.
+Why OIDC matters *for this project*: because the **deploy SP authenticates the deploy, it
+owns the deployed workspace files** — no human does. That is what makes the prod hardening
+in `databricks.yml` (identity-neutral `root_path` in the deploy SP's home, `CAN_MANAGE`
+locked to the deploy SP, `run_as` a separate run SP with `CAN_RUN` only) actually hold. And
+since the token is minted per-run and never stored, there is no long-lived secret to leak
+or rotate.
 
-The one-time setup (create the SP, its federation policy, and the GitHub Environment), a
-worked example, and the honest "what was tested vs. referenced" notes are in
-[`docs/prod-oidc-deploy.md`](docs/prod-oidc-deploy.md).
+The one-time setup (create the two SPs, the `CAN_USE` cross-grant, the federation policy,
+and the GitHub Environment), the three-tier permission model, and the "what was tested"
+notes are in [`docs/prod-oidc-deploy.md`](docs/prod-oidc-deploy.md).
 
 **References**
 
@@ -232,7 +236,7 @@ adjust for your own setup. At minimum, replace these placeholders:
 
 - `workspace.host` on each target. Swap the `<…-workspace>` values for real workspace URLs.
 - Catalogs: default to `dabs_cicd_<env>`. If those don't exist, create them, override per target (see the `sandbox` target), or pass `--var catalog=<existing_catalog>` at deploy time.
-- `prod_service_principal`. Filled in step 4.
+- `deploy_service_principal` and `run_service_principal`. Filled in step 4.
 
 Then confirm the shared library works before touching any workspace:
 
@@ -253,21 +257,25 @@ databricks bundle run dabs_cicd_pipeline -t dev
 
 Proves the pipeline end-to-end before any SP/OIDC machinery. Prod is CI-owned and deploys as a service principal (steps 4–5), not by hand.
 
-### 4. Create the prod service principal (account-admin)
+### 4. Create the prod service principals (account-admin)
 
-The Databricks-side identity work. In CI, the SP both **authenticates the deploy** (so it
-owns the workspace files) and **runs** the pipeline.
+The Databricks-side identity work. Prod uses **two** SPs (the least-privilege split): a
+**deploy SP** that authenticates CI and owns the files, and a **run SP** the pipeline runs as.
 
-**a. Create the service principal.** Put its application ID in the `prod_service_principal`
-variable in `databricks.yml`.
+**a. Create both service principals.** Put their application IDs in the
+`deploy_service_principal` and `run_service_principal` variables in `databricks.yml`.
 
-**b. Grant the SP** `USE CATALOG, CREATE SCHEMA` on the prod catalog, so it can create the
-medallion schemas. (Prod also declares a `CAN_MANAGE` `permissions` lock in `databricks.yml`
-— the SP manages the deployment, everyone else is read-only.)
+**b. Grant the deploy SP `CAN_USE` on the run SP** (Service Principal User, account-level).
+This lets the deployer set `run_as` to the run SP — the deploy fails without it.
 
-**c. Create the SP's federation policy.** Trusts GitHub's OIDC issuer, scoped to
-`repo:<org>/<repo>:environment:prod` — this is what lets GitHub authenticate *as the SP*
-with no stored secret. The subject references the `prod` **Environment** you create in
+**c. Grant the run SP** `USE CATALOG, CREATE SCHEMA` on the prod catalog, so it can create
+the medallion schemas. The **deploy SP gets no data grants** (least privilege). The deploy
+SP's `CAN_MANAGE` and run SP's `CAN_RUN` on the deployment come from the `permissions` block
+in `databricks.yml`.
+
+**d. Create the deploy SP's federation policy.** Trusts GitHub's OIDC issuer, scoped to
+`repo:<org>/<repo>:environment:prod` — this is what lets GitHub authenticate *as the deploy
+SP* with no stored secret. The subject references the `prod` **Environment** you create in
 step 5, so the two are linked.
 
 Exact CLI commands + a worked example (and the OAuth M2M secret alternative to OIDC) are in
@@ -312,7 +320,7 @@ gh variable set DATABRICKS_CLIENT_ID --body "<your-prod-sp-app-id>"
 With steps 4–5 done, the CI/CD path runs itself — no manual deploys to prod:
 
 - **Open a PR** → `ci.yml` runs the unit tests and `databricks bundle validate` against prod. A broken bundle or failing test blocks the merge.
-- **Merge to `main`** → `deploy.yml` deploys and runs the pipeline in prod, **after** the `prod` Environment's required reviewers approve. All as the SP, no stored secret.
+- **Merge to `main`** → `deploy.yml` deploys and runs the pipeline in prod, **after** the `prod` Environment's required reviewers approve. Deploy authenticates as the deploy SP; the pipeline runs as the run SP. No stored secret.
 
 Housekeeping:
 
@@ -328,16 +336,16 @@ you might make another.
 - **Merging to `main` costs compute.** `deploy.yml` deploys *and runs* the pipeline in prod on every merge. Serverless spins up each time. The prod schedule ships paused, but the CI-triggered `bundle run` is not.
 - **Deploy-and-run vs. deploy-only in CI.** This repo runs the pipeline in CI so a merge visibly produces data — good for a demo, but it burns compute and asserts nothing about correctness. Many teams deploy from CI and let the *schedule* (or a separate trigger) run the pipeline, keeping CI cheap and fast. To do that, drop the `bundle run` step from `deploy.yml` and unpause the schedule in `resources/jobs.yml`.
 - **One workspace vs. separate dev/prod workspaces.** This reference assumes two workspaces (dev, prod) for real isolation. You *can* collapse to a single workspace by pointing every target's `workspace.host` at it and relying on the per-env catalogs (`dabs_cicd_<env>`) for separation — lower fidelity, but fine for a quick trial.
-- **OIDC vs. an OAuth M2M secret for the prod deploy.** This repo uses OIDC (no stored secret). If your CI can't use GitHub OIDC, a service-principal OAuth M2M secret authenticates the same deploy *as the SP* with the same file-ownership outcome — you just store and rotate a secret. Both are covered in [`docs/prod-oidc-deploy.md`](docs/prod-oidc-deploy.md).
+- **OIDC vs. an OAuth M2M secret for the prod deploy.** This repo uses OIDC (no stored secret). If your CI can't use GitHub OIDC, a service-principal OAuth M2M secret authenticates the same deploy *as the deploy SP* with the same file-ownership outcome — you just store and rotate a secret. Both are covered in [`docs/prod-oidc-deploy.md`](docs/prod-oidc-deploy.md).
 - **No pre-prod stage — you may want to add staging.** This reference deploys `dev` locally and `prod` from CI, with nothing between. A production-grade setup usually promotes through a stable, CI-owned **staging** environment first: deploy + integration-test staging, and reach prod only if it passes. To add one, mirror the prod setup:
-  - **`databricks.yml`** — add a `staging` target with its own `staging_service_principal` variable, `run_as` that SP, and an SP-home `root_path` (copy the prod block, but skip `mode: production`, the `git.branch` pin, and the hardened `permissions` lock — staging is a test bed, so leave it broadly manageable for easy debugging). Set its own `quality_threshold`.
+  - **`databricks.yml`** — add a `staging` target with its own `staging_deploy_service_principal` / `staging_run_service_principal` variables, `run_as` the staging run SP, and a deploy-SP-home `root_path` (copy the prod block, but skip `mode: production`, the `git.branch` pin, and the hardened `permissions` lock — staging is a test bed, so leave it broadly manageable for easy debugging). Set its own `quality_threshold`.
   - **`ci.yml`** — add a `staging` entry to the `validate` matrix (target + environment + its host/client-id var names).
   - **`deploy.yml`** — add a `deploy-staging` job that runs first, and make `deploy-prod` depend on it with `needs: deploy-staging`, so prod cannot start until staging deploys and its pipeline run succeeds.
-  - **GitHub** — create a `staging` Environment and `DATABRICKS_STAGING_HOST` / `DATABRICKS_STAGING_CLIENT_ID` variables; create the staging SP + a federation policy scoped to `:environment:staging` (see `docs/prod-oidc-deploy.md`).
+  - **GitHub** — create a `staging` Environment and `DATABRICKS_STAGING_HOST` / `DATABRICKS_STAGING_CLIENT_ID` (the staging **deploy** SP) variables; create the staging deploy + run SPs, the `CAN_USE` cross-grant, and a federation policy on the deploy SP scoped to `:environment:staging` (see `docs/prod-oidc-deploy.md`).
   - This is the databricks/mlops-stacks split (only `dev` is development mode; staging + prod are SP-owned CI targets). An alternative is routing by branch — `main` → staging, a `release` branch → prod — instead of chaining jobs.
 - **Variable scope is repo-level.** The CI variables are readable by every job. For tighter isolation, move them to the `prod` Environment scope. `vars.*` resolves at either level, so no workflow change needed. Worth doing for real prod identifiers so unrelated workflows and fork PRs can't read them.
 - **`git.branch: main` on prod gates deploy, not validate.** Prod refuses to deploy from any branch except `main`. `workflow_dispatch` from a feature branch, or a stale local checkout, will fail. Intended safeguard.
 - **The prod "integration" run is shallow.** `bundle run` proves the pipeline builds and runs. It asserts nothing about correctness (row counts, schema, values). A pipeline that runs but emits wrong data still passes. Add `execute_sql` assertions after the run for a real test — and this is exactly the check a staging stage (above) should carry before prod.
 - **`databricks/setup-cli@main` tracks a moving target.** A breaking CLI change could break the pipeline silently. Pin a version (e.g. `@v0.236.0`) for a real production repo.
-- **OIDC path is unproven.** Local `bundle validate` was tested against a live workspace; the SP-over-OIDC auth was never run end-to-end (needs the SPs + federation policies created). First real Actions run is where federation subject mismatches or missing SP grants surface.
-- **FEVM workspaces block GitHub-hosted runners.** Corp-egress-only IP ACL 403s the runner at the network layer. Use a non-FEVM workspace, or a self-hosted runner inside the allowed network.
+- **OIDC path is proven.** The full two-SP split was run end-to-end via GitHub OIDC against a live workspace: deploy succeeded, the pipeline ran as the run SP, and a write by the run SP into the deploy SP's folder was denied 403 (details in [`docs/prod-oidc-deploy.md`](docs/prod-oidc-deploy.md)). The usual first-run gotchas are federation subject mismatches or a missing `CAN_USE` cross-grant.
+- **Some managed workspaces block GitHub-hosted runners.** A corp-egress-only IP ACL 403s the runner at the network layer (regardless of correct OIDC config). Use a workspace without such an ACL, or a self-hosted runner inside the allowed network.

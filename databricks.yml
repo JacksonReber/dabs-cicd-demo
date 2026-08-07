@@ -21,10 +21,23 @@ variables:
     default: ${bundle.target}
   quality_threshold:
     description: Minimum trade_value a row must meet to pass the silver layer.
-  prod_service_principal:
-    description: Application ID of the service principal that runs the prod pipeline.
-    # REPLACE: the prod SP's application ID (a UUID), created in README step 4.
-    default: "<prod-service-principal-application-id>"
+  deploy_service_principal:
+    description: >-
+      Application ID of the DEPLOY service principal. It authenticates CI/CD (GitHub
+      OIDC), so it OWNS the deployed workspace files and holds CAN_MANAGE on the
+      deployment — this is the tamper-proofing. It gets NO Unity Catalog data grants
+      (least privilege). Separate from the run identity below.
+    # REPLACE: the deploy SP's application ID (a UUID), created in README step 4.
+    default: "<deploy-service-principal-application-id>"
+  run_service_principal:
+    description: >-
+      Application ID of the RUN service principal — the identity the prod pipeline
+      RUNS as (`run_as`). It holds the UC data grants (USE CATALOG, CREATE SCHEMA)
+      and CAN_RUN on the deployed files, but never CAN_MANAGE — so it can read and
+      execute the deployed code but cannot tamper with it. The deploy SP must have
+      Service Principal User (CAN_USE) on this SP to assign it as run_as.
+    # REPLACE: the run SP's application ID (a UUID), created in README step 4.
+    default: "<run-service-principal-application-id>"
 
 targets:
   # dev runs in DEVELOPMENT mode: each developer deploys to their OWN workspace home
@@ -52,17 +65,19 @@ targets:
       quality_threshold: "0"
 
   # prod runs in PRODUCTION mode and is HARDENED so the deployed bundle artifacts
-  # cannot be modified or deleted by ordinary users:
-  #   - The SERVICE PRINCIPAL is both the DEPLOY identity and the RUN identity. In
-  #     CI/CD the SP authenticates (GitHub OIDC federation, or an OAuth M2M secret)
-  #     and runs `bundle deploy`, so the SP — never a human — OWNS the workspace
-  #     files. (`run_as` alone only sets the run identity; file ownership comes from
-  #     whoever authenticates the deploy.)
-  #   - Files deploy to the SP's OWN home, which is identity-neutral (a service
+  # cannot be modified or deleted by ordinary users. It uses TWO service principals —
+  # the Databricks-recommended least-privilege split (see docs/prod-oidc-deploy.md):
+  #   - The DEPLOY SP authenticates CI/CD (GitHub OIDC) and runs `bundle deploy`, so
+  #     it — never a human — OWNS the workspace files. File ownership comes from
+  #     whoever authenticates the deploy, so `root_path` and the CAN_MANAGE lock are
+  #     both keyed to the DEPLOY SP. It holds NO Unity Catalog data grants.
+  #   - The RUN SP is only the execution identity (`run_as`). It holds the UC data
+  #     grants and CAN_RUN on the files, but never CAN_MANAGE — so it can read and
+  #     execute the deployed code but cannot tamper with it. The deploy SP needs
+  #     Service Principal User (CAN_USE) on the run SP to assign it here.
+  #   - Files deploy to the DEPLOY SP's OWN home, which is identity-neutral (a service
   #     identity, not a person) AND not world-writable — unlike /Workspace/Shared,
   #     which grants read/write to all workspace users.
-  #   - `permissions` lock the deployment folder and resources: only the SP can
-  #     manage; everyone else is read-only (CAN_VIEW).
   #   NOTE: workspace/account admins still bypass object ACLs by design. Real
   #   protection = few admins + guarded SP credentials (CI/CD secret store or OIDC,
   #   never on a laptop) + Git as the source of truth + audit logs — not ACLs alone.
@@ -76,13 +91,19 @@ targets:
       branch: main
     workspace:
       host: https://<prod-workspace>.cloud.databricks.com   # REPLACE: your prod workspace URL
-      # root_path resolves from prod_service_principal (set above) — no edit needed here.
-      root_path: /Workspace/Users/${var.prod_service_principal}/.bundle/${bundle.name}/${bundle.target}
+      # root_path resolves from the DEPLOY SP — it owns the files. No edit needed here.
+      root_path: /Workspace/Users/${var.deploy_service_principal}/.bundle/${bundle.name}/${bundle.target}
     run_as:
-      service_principal_name: ${var.prod_service_principal}
+      service_principal_name: ${var.run_service_principal}
     permissions:
+      # Only the DEPLOY SP can manage the deployment — this is the tamper-proofing.
       - level: CAN_MANAGE
-        service_principal_name: ${var.prod_service_principal}
+        service_principal_name: ${var.deploy_service_principal}
+      # The RUN SP can read + execute the deployed code, but NOT edit/manage it.
+      # (An explicit CAN_RUN is required — CAN_VIEW alone would not let it execute.)
+      - level: CAN_RUN
+        service_principal_name: ${var.run_service_principal}
+      # Everyone else is read-only.
       - level: CAN_VIEW
         group_name: users
     variables:
