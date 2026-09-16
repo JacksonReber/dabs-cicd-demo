@@ -1,0 +1,30 @@
+resources:
+  pipelines:
+    dabs_cicd_reference:
+      name: dabs_cicd_reference_${var.env}
+
+      # Same catalog as the trades pipeline (dabs_cicd_<env>). Two pipelines
+      # can share a catalog; they stay separated by schema/table names.
+      catalog: ${var.catalog}
+      schema: bronze
+      serverless: true
+
+      # THE shared-library pattern, shown a second time: root_path is the
+      # BUNDLE ROOT (`..`), the same directory the trades pipeline points at —
+      # because that is where `libraries/` lives. Both pipelines get libraries/
+      # on sys.path from the single copy at the bundle root; it is NOT
+      # duplicated per pipeline. If this pointed at ../src/reference instead,
+      # `from libraries...` would NOT resolve here.
+      root_path: ..
+
+      # Scoped to this pipeline's own folder, so it loads only the reference
+      # tables — never src/trades/**.
+      libraries:
+        - glob:
+            include: ../src/reference/**
+
+      # This pipeline reads only `env` — it has no quality filter, so it does
+      # NOT consume quality_threshold. Pipelines take just the configuration
+      # they need; there is no requirement to pass every bundle variable.
+      configuration:
+        env: ${var.env}

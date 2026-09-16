@@ -19,7 +19,7 @@ The patterns this repo demonstrates:
 2. Passing those variables into a **pipeline resource** — as resource fields (`catalog`)
    and via the `configuration` block (`env` / `quality_threshold`).
 3. **Referencing** the configuration variables in pipeline code with `spark.conf.get(...)`.
-4. Sharing a **`libraries/` helper package** across pipeline files on serverless.
+4. Sharing a **`libraries/` helper package** across **multiple pipelines** on serverless.
 5. Environment-appropriate **`run_as` identity** and **deploy location** (`root_path`).
 6. A full **CI/CD pipeline** in GitHub Actions — PR validation (`ci.yml`) and a gated
    **deploy to prod** on merge (`deploy.yml`) — authenticated via **OIDC** (no stored secret).
@@ -30,12 +30,12 @@ The patterns this repo demonstrates:
 databricks.yml  (variables, mostly DERIVED from the target name)
       │
       ▼
-resources/pipelines.yml
+resources/trades.pipeline.yml
       ├─ catalog: ${var.catalog}   ──►  pipeline's default catalog (dabs_cicd_<env>)
       └─ configuration: { env, quality_threshold }
                               │
                               ▼
-src/*.py   spark.conf.get("env") / spark.conf.get("quality_threshold")
+src/trades/*.py   spark.conf.get("env") / spark.conf.get("quality_threshold")
                               │
                               ▼
                         labels / filter logic / output data
@@ -69,14 +69,24 @@ is a genuine per-environment policy knob (not derivable from the name).
 
 ### What it builds
 
-Tables are written **schema-qualified, one schema per medallion layer** (schema names are
-consistent across all environments):
+**Two pipelines** in one bundle, both writing **schema-qualified, one schema per medallion
+layer** (schema names are consistent across all environments).
+
+`dabs_cicd_trades` (`src/trades/`):
 
 | Layer | File | Output table | Notes |
 |-------|------|-------------|-------|
-| Bronze | `src/bronze.py` | `bronze.trades` | generates 10 mock trades, stamps `env` from config |
-| Silver | `src/silver.py` | `silver.trades` | computes `trade_value`, filters by `quality_threshold` |
-| Gold | `src/gold.py` | `gold.portfolio_summary` | per-account totals |
+| Bronze | `src/trades/bronze.py` | `bronze.trades` | generates 10 mock trades, stamps `env` from config |
+| Silver | `src/trades/silver.py` | `silver.trades` | computes `trade_value`, filters by `quality_threshold` |
+| Gold | `src/trades/gold.py` | `gold.portfolio_summary` | per-account totals |
+
+`dabs_cicd_reference` (`src/reference/`) — a second pipeline that reuses the **same**
+`libraries/` package and reads only `env` (no `quality_threshold`):
+
+| Layer | File | Output table | Notes |
+|-------|------|-------------|-------|
+| Bronze | `src/reference/bronze.py` | `bronze.securities` | 6 mock securities, stamps `env` from config |
+| Gold | `src/reference/gold.py` | `gold.securities_by_sector` | count of securities per sector |
 
 All tables land in the target's catalog (`dabs_cicd_<env>`), in the `bronze` / `silver` /
 `gold` schemas.
@@ -89,14 +99,36 @@ environment with no code change:
 | dev | 0 | 10 |
 | prod | 15000 | 7 |
 
-### Shared library on serverless
+### Shared library across multiple pipelines on serverless
 
 `libraries/` is a normal Python package imported by the pipeline files
-(`from libraries.config import get_conf`). It resolves on serverless because the pipeline
+(`from libraries.config import get_conf`). It resolves on serverless because each pipeline
 sets `root_path: ..` (the bundle root), which Lakeflow automatically adds to `sys.path`.
 `pyproject.toml` is only for running the unit tests locally — it does **not** package the
 library onto the cluster, and the `--editable` install pattern is deliberately avoided
 because it no-ops on serverless.
+
+**One `libraries/`, many pipelines.** Both pipelines here import the *same* package from
+the *single* copy at the bundle root — it is never duplicated per pipeline. Adding a third
+pipeline that uses the helpers needs nothing new in `libraries/`; the pipeline just points
+`root_path` at the bundle root like the others. Two rules make this work when more than one
+pipeline lives in the bundle — miss either and it breaks:
+
+1. **`root_path` points at the bundle root (`..`), not the pipeline's own `src/` subfolder.**
+   `root_path` is what Lakeflow adds to `sys.path`, so it must be the directory that
+   *contains* `libraries/`. If you narrow it to `../src/trades` (a common instinct, and what
+   some init templates scaffold), that subfolder goes on `sys.path` instead and
+   `from libraries...` no longer resolves.
+2. **Each pipeline's `libraries:` glob is scoped to its own folder** (`../src/trades/**`,
+   `../src/reference/**`) — never a bare `../src/**`. The `libraries:` glob lists the files
+   loaded as *pipeline definitions*; with several pipelines in one bundle, a bare `../src/**`
+   makes every pipeline load every other pipeline's tables. A folder per pipeline plus a
+   scoped glob keeps them isolated while they still share `libraries/`.
+
+So the per-pipeline recipe is: put the pipeline's definition files in their own
+`src/<pipeline>/` folder, set `root_path: ..`, and scope the glob to `../src/<pipeline>/**`.
+See [`resources/trades.pipeline.yml`](resources/trades.pipeline.yml) and
+[`resources/reference.pipeline.yml`](resources/reference.pipeline.yml) side by side.
 
 ### Environments, identity, and deploy location
 
@@ -190,15 +222,20 @@ notes are in [`docs/prod-oidc-deploy.md`](docs/prod-oidc-deploy.md).
 .
 ├── databricks.yml            # bundle name, derived variables, dev/sandbox/prod targets
 ├── resources/
-│   ├── pipelines.yml         # pipeline resource; wires variables in
-│   └── jobs.yml              # scheduled job that triggers the pipeline
-├── libraries/                # shared, importable helpers (not pipeline defs)
+│   ├── trades.pipeline.yml   # trades pipeline; root_path: .. + glob scoped to src/trades/**
+│   ├── reference.pipeline.yml# reference pipeline; same root_path, glob scoped to src/reference/**
+│   └── jobs.yml              # one scheduled job that triggers BOTH pipelines
+├── libraries/                # shared, importable helpers (not pipeline defs) — ONE copy, both pipelines import it
 │   ├── config.py             # get_conf, parse_threshold
 │   └── naming.py             # table_fqn, label_for_env
 ├── src/
-│   ├── bronze.py             # generate mock trades       → bronze.trades
-│   ├── silver.py             # enrich + quality filter    → silver.trades
-│   └── gold.py               # aggregate                  → gold.portfolio_summary
+│   ├── trades/               # dabs_cicd_trades pipeline definitions
+│   │   ├── bronze.py         # generate mock trades       → bronze.trades
+│   │   ├── silver.py         # enrich + quality filter    → silver.trades
+│   │   └── gold.py           # aggregate                  → gold.portfolio_summary
+│   └── reference/            # dabs_cicd_reference pipeline definitions
+│       ├── bronze.py         # mock securities            → bronze.securities
+│       └── gold.py           # count per sector           → gold.securities_by_sector
 ├── tests/                    # pytest for libraries/ (local only)
 ├── docs/
 │   └── prod-oidc-deploy.md   # SP + OIDC hardening: one-time setup & worked example
@@ -252,10 +289,11 @@ Fastest path to "it works". Runs in development mode as you, in your own workspa
 ```bash
 databricks bundle validate -t dev
 databricks bundle deploy   -t dev
-databricks bundle run dabs_cicd_pipeline -t dev
+databricks bundle run dabs_cicd_trades    -t dev
+databricks bundle run dabs_cicd_reference -t dev
 ```
 
-Proves the pipeline end-to-end before any SP/OIDC machinery. Prod is CI-owned and deploys as a service principal (steps 4–5), not by hand.
+Proves both pipelines end-to-end before any SP/OIDC machinery. Prod is CI-owned and deploys as a service principal (steps 4–5), not by hand.
 
 ### 4. Create the prod service principals (account-admin)
 
@@ -320,7 +358,7 @@ gh variable set DATABRICKS_CLIENT_ID --body "<your-prod-sp-app-id>"
 With steps 4–5 done, the CI/CD path runs itself — no manual deploys to prod:
 
 - **Open a PR** → `ci.yml` runs the unit tests and `databricks bundle validate` against prod. A broken bundle or failing test blocks the merge.
-- **Merge to `main`** → `deploy.yml` deploys and runs the pipeline in prod, **after** the `prod` Environment's required reviewers approve. Deploy authenticates as the deploy SP; the pipeline runs as the run SP. No stored secret.
+- **Merge to `main`** → `deploy.yml` deploys and runs **both pipelines** in prod, **after** the `prod` Environment's required reviewers approve. Deploy authenticates as the deploy SP; the pipelines run as the run SP. No stored secret.
 
 Housekeeping:
 
@@ -333,8 +371,8 @@ This is a reference, so the list below is less "gotchas" and more "**decisions y
 make differently** for your own use case." Each item is a choice this repo made one way and
 you might make another.
 
-- **Merging to `main` costs compute.** `deploy.yml` deploys *and runs* the pipeline in prod on every merge. Serverless spins up each time. The prod schedule ships paused, but the CI-triggered `bundle run` is not.
-- **Deploy-and-run vs. deploy-only in CI.** This repo runs the pipeline in CI so a merge visibly produces data — good for a demo, but it burns compute and asserts nothing about correctness. Many teams deploy from CI and let the *schedule* (or a separate trigger) run the pipeline, keeping CI cheap and fast. To do that, drop the `bundle run` step from `deploy.yml` and unpause the schedule in `resources/jobs.yml`.
+- **Merging to `main` costs compute.** `deploy.yml` deploys *and runs* both pipelines in prod on every merge. Serverless spins up each time. The prod schedule ships paused, but the CI-triggered `bundle run` steps are not.
+- **Deploy-and-run vs. deploy-only in CI.** This repo runs the pipelines in CI so a merge visibly produces data — good for a demo, but it burns compute and asserts nothing about correctness. Many teams deploy from CI and let the *schedule* (or a separate trigger) run the pipelines, keeping CI cheap and fast. To do that, drop the `bundle run` steps from `deploy.yml` and unpause the schedule in `resources/jobs.yml`.
 - **One workspace vs. separate dev/prod workspaces.** This reference assumes two workspaces (dev, prod) for real isolation. You *can* collapse to a single workspace by pointing every target's `workspace.host` at it and relying on the per-env catalogs (`dabs_cicd_<env>`) for separation — lower fidelity, but fine for a quick trial.
 - **OIDC vs. an OAuth M2M secret for the prod deploy.** This repo uses OIDC (no stored secret). If your CI can't use GitHub OIDC, a service-principal OAuth M2M secret authenticates the same deploy *as the deploy SP* with the same file-ownership outcome — you just store and rotate a secret. Both are covered in [`docs/prod-oidc-deploy.md`](docs/prod-oidc-deploy.md).
 - **No pre-prod stage — you may want to add staging.** This reference deploys `dev` locally and `prod` from CI, with nothing between. A production-grade setup usually promotes through a stable, CI-owned **staging** environment first: deploy + integration-test staging, and reach prod only if it passes. To add one, mirror the prod setup:

@@ -169,7 +169,8 @@ steps:
   - uses: actions/checkout@v4
   - uses: databricks/setup-cli@main
   - run: databricks bundle deploy -t prod
-  - run: databricks bundle run dabs_cicd_pipeline -t prod
+  - run: databricks bundle run dabs_cicd_trades -t prod
+  - run: databricks bundle run dabs_cicd_reference -t prod
 ```
 
 ## What was actually tested vs. referenced

@@ -1,7 +1,7 @@
 """Bronze layer — generate mock trade data.
 
-`env` is read from pipeline configuration (set in resources/pipelines.yml as
-`${var.env}`) and stamped on every row, demonstrating the variable flow:
+`env` is read from pipeline configuration (set in resources/trades.pipeline.yml
+as `${var.env}`) and stamped on every row, demonstrating the variable flow:
 databricks.yml -> configuration -> spark.conf.get -> output data.
 """
 
