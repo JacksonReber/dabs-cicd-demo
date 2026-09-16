@@ -1,0 +1,38 @@
+resources:
+  pipelines:
+    dabs_cicd_trades:
+      name: dabs_cicd_trades_${var.env}
+
+      # Variable -> pipeline RESOURCE field. Sets the default catalog
+      # (dabs_cicd_<env>, derived from the target name).
+      catalog: ${var.catalog}
+
+      # Default schema for any unqualified name. Tables are written
+      # schema-qualified per medallion layer (bronze.* / silver.* / gold.*),
+      # with schema names kept consistent across all environments.
+      schema: bronze
+
+      serverless: true
+
+      # root_path is the BUNDLE ROOT (one level up from resources/). Lakeflow
+      # auto-appends it to sys.path, which is what makes `from libraries.config
+      # import ...` resolve in the transformation files. Every pipeline that
+      # imports the shared `libraries/` package points root_path here — the
+      # bundle root — NOT at its own src/ subfolder (see reference.pipeline.yml).
+      # (Do NOT use environment.dependencies/--editable; it no-ops on serverless.)
+      root_path: ..
+
+      # Load ONLY this pipeline's definition files. The glob is SCOPED to
+      # src/trades/** — not src/** — so this pipeline never picks up the
+      # reference pipeline's tables. With multiple pipelines in one bundle a
+      # bare src/** would make every pipeline load every other's definitions;
+      # a per-pipeline folder + scoped glob keeps them isolated. libraries/ is
+      # imported (via root_path/sys.path above), not loaded here.
+      libraries:
+        - glob:
+            include: ../src/trades/**
+
+      # Variables -> pipeline CONFIGURATION. Read in code via spark.conf.get().
+      configuration:
+        env: ${var.env}
+        quality_threshold: ${var.quality_threshold}

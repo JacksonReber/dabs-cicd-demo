@@ -59,5 +59,7 @@ jobs:
         run: databricks bundle validate -t prod
       - name: Deploy bundle (prod)
         run: databricks bundle deploy -t prod
-      - name: Run pipeline (prod)
-        run: databricks bundle run dabs_cicd_pipeline -t prod
+      - name: Run trades pipeline (prod)
+        run: databricks bundle run dabs_cicd_trades -t prod
+      - name: Run reference pipeline (prod)
+        run: databricks bundle run dabs_cicd_reference -t prod
